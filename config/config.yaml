@@ -1,0 +1,88 @@
+server:
+  addr: ":8080"
+  mode: debug            # debug | release
+  read_timeout: 15s
+  write_timeout: 15s
+  ws_ping_interval: 30s  # 服务端心跳间隔
+  ws_pong_wait: 75s      # 读超时（需大于 ping 间隔）
+  ws_write_wait: 10s
+  ws_send_buffer: 512    # 单连接发送队列长度，满了触发背压丢弃
+  graceful_timeout: 15s
+  pprof: true            # 是否挂载 /debug/pprof
+
+mysql:
+  # 容器映射到 3307，避免与本机已有 MySQL 冲突
+  dsn: "root:root123456@tcp(127.0.0.1:13306)/imchat?charset=utf8mb4&parseTime=True&loc=Local"
+  max_idle_conns: 20
+  max_open_conns: 200
+  conn_max_lifetime: 30m
+  conn_max_idle_time: 5m
+  auto_migrate: true
+
+redis:
+  # 容器映射到 6380，避免与本机已有 Redis 冲突
+  addr: "127.0.0.1:16379"
+  password: ""
+  db: 0
+  pool_size: 200
+  min_idle_conns: 20
+  dial_timeout: 2s
+  read_timeout: 1s
+  write_timeout: 1s
+
+rabbitmq:
+  url: "amqp://imchat:imchat123456@127.0.0.1:5672/"
+  enabled: true
+  prefetch: 100
+  publisher_confirm: true
+  channel_pool: 8        # 生产者复用 channel 数
+
+cluster:
+  enabled: true          # 集群开关：true 时通过 Redis 总线跨节点投递，单机也可开着（多一次 Redis 往返）
+  shards: 64             # 本地连接分片数，必须为 2 的幂
+  bus_channel: "im:bus"
+
+ratelimit:
+  enabled: true
+  distributed: true      # true：登录与写接口走 Redis 滑动窗口，集群扩容不会顺带放宽配额
+
+  # 读接口：进程内令牌桶，零网络开销
+  http_qps: 50           # 单用户每秒
+  http_burst: 100
+
+  # 写接口：两道闸串联，先过瞬时速率（本地令牌桶），再过窗口总量（Redis 滑动窗口）
+  write_qps: 10          # 瞬时速率：单用户每秒
+  write_burst: 20        # 瞬时突发：允许连发 20 条
+  write_limit: 120       # 总量：单用户每窗口上限，跨实例共享
+  write_window: 1m
+
+  # 登录/注册：按 IP 限流。账号锁定换用户名即可绕过，撞库的兜底在 IP 维度
+  auth_qps: 5            # 瞬时速率：单 IP 每秒
+  auth_burst: 10         # 突发放宽到 10，避免 NAT 出口多个用户同时登录被误伤
+  auth_limit: 30         # 总量：单 IP 每分钟尝试次数，跨实例共享
+  auth_window: 1m
+
+  upload_qps: 2          # 上传：单用户每秒
+  upload_burst: 5
+
+  ws_handshake_qps: 2    # WS 握手：单 IP 每秒，挡反复建连
+  ws_handshake_burst: 4
+  ws_max_conns: 5        # 单用户最大在线设备数
+  ws_msg_qps: 20         # 单连接每秒消息条数
+  ws_msg_burst: 40
+
+cache:
+  user_ttl: 10m
+  friend_ttl: 5m
+  group_member_ttl: 5m
+  ttl_jitter: 60s        # 过期时间随机抖动，防雪崩
+
+jwt:
+  secret: "imchat-dev-secret-please-change-in-production"
+  expire: 168h
+  issuer: "imchat"
+
+upload:
+  dir: "./uploads"
+  max_size_mb: 10
+  public_base: "/uploads"   # 对外访问前缀，留空则返回相对路径

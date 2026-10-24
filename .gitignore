@@ -1,0 +1,26 @@
+# 编译产物
+bin/
+*.exe
+*.test
+*.out
+
+# 运行时数据
+uploads/*
+!uploads/.gitkeep
+logs/
+*.log
+
+# 本地配置覆盖
+config/config-local.yaml
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 本地开发记录与工具缓存，不进版本管理
+.workbuddy/
+
+# 系统
+.DS_Store
+Thumbs.db
