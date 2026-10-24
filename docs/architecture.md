@@ -277,7 +277,7 @@ Pipeline 只省往返，既不是事务也不保证全部执行，下列场景�
 「先查上限再插入」是典型的先读后写。事务本身不阻止两个并发事务读到同一份旧值，
 因此 `AddMembers` / `RemoveMember` 在事务内额外 `SELECT ... FOR UPDATE` 锁群行，
 用**锁内的** `member_count` 做判断。实测：995 人的群并发发起 3 次各 3 人的邀请，
-只有 1 次成功，最终 `member_count = 998 = COUNT(*)`（`scripts/verify_group_cap_race.py`）。
+只有 1 次成功，最终 `member_count = 998 = COUNT(*)`。
 
 群消息指针则用条件更新代替锁：`UPDATE groups SET ... WHERE id = ? AND last_msg_seq < ?`。
 并发发送时事务提交顺序可能与 seq 顺序相反，无条件覆盖会让指针倒退。
@@ -307,7 +307,6 @@ Redis 与 MySQL 无法同事务，只能选一个方向保证：
 
 ```bash
 go run ./cmd/smoke -base http://127.0.0.1:8080          # 功能回归（45 项）
-python scripts/bench_read_fanout.py                     # 1000 人群读扩散实测
 curl http://127.0.0.1:8080/metrics                      # 在线连接、goroutine、堆内存
 go tool pprof http://127.0.0.1:8080/debug/pprof/profile?seconds=30
 ```

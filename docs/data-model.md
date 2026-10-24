@@ -367,7 +367,7 @@ Redis 的 `im:read:{uid}` hash 是热数据，DB 是回源与冷启动的兜底�
 
 ## 六、已知问题与待办
 
-### 6.1 已修复（2026-10-24）
+### 6.1 已修复
 
 1. `messages` 未嵌入 `BaseModel`，`BeforeCreate` 兜底失效、撤回没有 `updated_at`。
    现已统一嵌入，并删除 `Send` 里手动 `snowflake.Next()` 的赋值。
@@ -417,11 +417,3 @@ Redis 的 `im:read:{uid}` hash 是热数据，DB 是回源与冷启动的兜底�
 - 布尔开关若要区分「未传」与「false」，用 `*bool`，不要用 `binding:"required"`。
 - 新增 `NOT NULL` 列必须给 default，否则 AutoMigrate 对存量行会填零值或失败。
 - 新增索引请显式命名并关注列顺序：等值过滤列在前，排序列在后。
-
----
-
-## 变更记录
-
-| 日期 | 内容 |
-|---|---|
-| 2026-10-24 | 首版；同步修复 Message 基类、seq 恢复、朋友圈状态常量、会话列表索引 |
