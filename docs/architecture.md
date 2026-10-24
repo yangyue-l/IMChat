@@ -142,8 +142,7 @@ shard := shards[x & 63]
 | 索引 | 用途 |
 |---|---|
 | `uk_from_client (client_msg_id)` | 幂等兜底（单列全局唯一，不区分发送者） |
-| `idx_conv_seq (conv_id, seq)` | 历史消息游标分页 |
-| `idx_created_at` | 审计与冷数据归档 |
+| `uk_conv_seq (conv_id, seq)` | 历史消息游标分页，同时兜住 seq 唯一（唯一索引） |
 
 完整字段与索引清单见 [data-model.md](./data-model.md)。
 

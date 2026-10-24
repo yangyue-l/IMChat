@@ -6,6 +6,10 @@
 表结构由 `cmd/server` 启动时的 `AutoMigrate(model.AllModels())` 创建，`deploy/init/01-init.sql`
 只负责建库与字符集。因此**模型上的 tag 就是表结构的唯一事实来源**，改结构即改 tag。
 
+`AutoMigrate` 只加不删、同名索引会直接跳过，所以「删索引、改索引列顺序、唯一索引上线前的数据清洗」
+这类改动写在 `deploy/migrate/` 下（按日期命名，脚本可重复执行），顺序永远是
+**先跑脚本、再重启服务**，让 AutoMigrate 把新索引补回来。
+
 ---
 
 ## 一、总览
@@ -28,7 +32,12 @@
 | `moment_comments` | `MomentComment` | 评论与回复 | 评论列表 |
 
 `PublicUser` 不是表，是 `User.ToPublic()` 生成的对外投影，只保留
-`id / username / nickname / avatar / gender / signature`，把 `password_hash`、`phone`、`status` 挡在响应之外。
+`id / nickname / avatar / gender / signature`，把 `password_hash`、`phone`、`status`、
+`username` 挡在响应之外。
+
+`username` 是登录名（等同于 QQ 号），只在**主动搜索**时随 `UserSearchItem` 回传：
+搜索本身就是按账号或昵称匹配，结果里不带登录名就无法区分同名用户；除此之外
+好友列表、群成员、消息发送者、点赞与评论者都不带它。
 
 ---
 
@@ -36,16 +45,21 @@
 
 ### 2.1 主键与时间戳
 
-除 `Message` 外所有实体嵌入 `BaseModel`：
+12 个实体**全部**嵌入 `BaseModel`：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `id` | `int64` | 雪花 ID，`primaryKey;autoIncrement:false`，由 `BaseModel.BeforeCreate` 兜底分配 |
-| `created_at` | `time.Time` | 创建时间，单列索引 |
+| `created_at` | `time.Time` | 创建时间，**不建索引**，理由见下 |
 | `updated_at` | `time.Time` | GORM 自动维护（`Update` 会刷新，`UpdateColumns` 不会） |
 
-`Message` 也嵌入 `BaseModel`，因此同样拥有这三个字段。**所有写入路径都不要手动生成 ID**，
-交给 `BeforeCreate`，避免出现「某个新入口忘了赋值 → 主键写成 0 → 并发插入冲突」。
+**所有写入路径都不要手动生成 ID**，交给 `BeforeCreate`，避免出现「某个新入口忘了赋值
+→ 主键写成 0 → 并发插入冲突」。
+
+`created_at` 上刻意没有索引：全库没有一条查询按它过滤或排序，列表一律是
+「等值列 + 主键游标」（`conv_id + seq`、`user_id + id`、`user_id + last_msg_at`）。
+12 张表各挂一个用不到的单列索引，换来的是每次写入多一次 B+ 树维护，对 `messages`
+这种写多读少的大表是纯损耗。
 
 ### 2.2 JSON 序列化
 
@@ -60,6 +74,10 @@
 | 物理删除 | `friends`、`moment_likes`、`moment_comments` | 删除即无意义数据，靠唯一索引保证不重复 |
 | 只增不改 | `friend_requests` | 申请历史用于审计与风控 |
 
+`moment_comments` 是父子结构（`parent_id`）：删除一级评论时，同一事务里连带删掉挂在
+它下面的回复，并按实际删除条数扣减 `comment_count`。只删父节点会让回复的
+`parent_id` 悬空、渲染不出上下文，计数也会虚高。
+
 ### 2.4 外键与一致性
 
 **数据库层不建外键**（GORM 默认行为），跨表一致性全部由 service 层事务保证。典型组合：
@@ -72,6 +90,16 @@
 - `uk_xxx`：唯一索引。
 - `idx_xxx`：普通索引。
 - 未显式命名的单列索引由 GORM 自动生成 `idx_<表名>_<字段名>`。
+
+### 2.6 加字段 / 改索引的约定
+
+- `int64` 一律带 `json:",string"`，切片用 `jsonx.Int64List`（`,string` 对 slice 不生效）。
+- 布尔开关若要区分「未传」与 `false`，用 `*bool`，不要用 `binding:"required"`。
+- 「没有值」和「空串」要分开时用指针（如 `users.phone`），唯一索引下多个 `NULL` 合法、多个 `''` 非法。
+- 新增 `NOT NULL` 列必须给 default，否则 AutoMigrate 对存量行会填零值或失败。
+- 新增索引请显式命名并关注列顺序：等值过滤列在前，排序列在后。
+- 已有的索引要改列或改唯一性时，先改 tag，再在 `deploy/migrate/` 补一条 DROP，
+  否则 AutoMigrate 看到同名索引会直接跳过，改动等于没发生。
 
 ---
 
@@ -88,12 +116,16 @@
 | `avatar` | varchar(255) | 头像 URL |
 | `gender` | tinyint | 0 未知 / 1 男 / 2 女，默认 0 |
 | `signature` | varchar(255) | 个性签名 |
-| `phone` | varchar(20) | 预留字段，**当前 service 层无任何读写**；非唯一索引 |
+| `phone` | varchar(20) NULL | 预留手机号，**当前 service 层无任何读写**；`*string` + **唯一索引** |
 | `status` | tinyint | `UserStatusNormal(0)` / `UserStatusDisabled(1)`，索引供后台过滤 |
 | `last_active_at` | datetime NULL | 最后活跃时间，指针用于区分「从未活跃」与「零值」 |
 | `created_at` / `updated_at` | datetime | BaseModel |
 
-索引：`PRIMARY(id)`、`uniq(username)`、`idx(phone)`、`idx(status)`、`idx(created_at)`。
+索引：`PRIMARY(id)`、`uniq(username)`、`uk(phone)`、`idx(status)`。
+
+`phone` 用指针而不是 `string`：未绑定是「没有值」，不是空串。唯一索引下多个 `NULL`
+合法、多个 `''` 非法，将来接手机号登录时可以直接落在 `uk_users_phone` 上，
+不需要再洗一次数据（存量库的空串清洗见 `deploy/migrate/`）。
 
 ### 3.2 friends
 
@@ -152,7 +184,7 @@
 | `last_msg_type` | tinyint | 最后一条消息类型，前端决定渲染方式 |
 | `last_msg_at` | datetime NULL | 最后消息时间；为 NULL 时列表展示 `created_at` |
 
-索引：`PRIMARY(id)`、`idx(owner_id)`、`idx(status)`、`idx(created_at)`。
+索引：`PRIMARY(id)`、`idx(owner_id)`、`idx(status)`。
 
 `UpdateLastMessage` 带 `WHERE last_msg_seq < ?` 条件，乱序到达的旧消息不会把指针回退。
 
@@ -188,14 +220,25 @@
 | `client_msg_id` | varchar(64) | 客户端幂等键，**唯一索引**，全局唯一不区分发送者 |
 | `msg_type` | tinyint | 1 文本 / 2 图片 / 3 文件 / 4 系统 |
 | `content` | text | 正文；文本上限 `maxContentRunes(5000)`，由 service 校验 |
-| `extra` | varchar(1024) | JSON 扩展：图片宽高、文件名等；**无长度校验，写入方自行控制在 1024 字节内** |
+| `extra` | varchar(1024) | JSON 扩展：图片宽高、文件名等；service 按字节校验 `maxExtraBytes(1024)` |
 | `status` | tinyint | 0 正常 / 1 已撤回 |
-| `created_at` | datetime | 发送时间，索引；撤回窗口按它判断 |
+| `created_at` | datetime | 发送时间；撤回窗口按它判断 |
 | `updated_at` | datetime | 状态变更时间（撤回会刷新） |
 
-索引：`PRIMARY(id)`、`idx_conv_seq(conv_id, seq)`、`idx(from_id)`、`idx(group_id)`、`uk_from_client(client_msg_id) UNIQUE`、`idx(created_at)`。
+索引：`PRIMARY(id)`、`uk_conv_seq(conv_id, seq) UNIQUE`、`idx(from_id)`、`idx(group_id)`、
+`uk_from_client(client_msg_id) UNIQUE`。
 
-`idx_conv_seq` 支撑 `WHERE conv_id = ? AND seq < ? ORDER BY seq DESC LIMIT n` 的游标分页，代价与页深无关。
+`uk_conv_seq` 支撑 `WHERE conv_id = ? AND seq < ? ORDER BY seq DESC LIMIT n` 的游标分页，
+代价与页深无关；它同时是 `seq` 唯一的最终防线——正常路径由 Redis 原子分配保证不重复，
+但只要有人删了键或混入旧数据，重复 `seq` 会让客户端把新消息当旧消息丢掉且毫无信号，
+所以落到 DB 层后重复写入直接报 1062：
+
+- 回查得到同 `client_msg_id` 的消息 → 并发重复投递，直接返回已落库的那条；
+- 回查不到 → 序号被抢占，返回可重试的冲突提示。此时 Redis 计数器已经越过冲突值，
+  客户端用同一个 `client_msg_id` 重试就会拿到新序号并成功。
+
+`extra` 的 1024 字节由 `validateContent` 卡住：严格模式下超长是 MySQL 1406，
+不拦就会变成前端看不懂的 500。
 
 ### 3.8 conversations
 
@@ -215,7 +258,10 @@
 | `pinned` | bool | 置顶，排序时优先于时间 |
 | `muted` | bool | **免打扰**，只影响推送提示 |
 
-索引：`PRIMARY(id)`、`uk_user_conv(user_id, conv_id) UNIQUE`、`idx_user_last(user_id, last_msg_at)`、`idx(created_at)`。
+索引：`PRIMARY(id)`、`uk_user_conv(user_id, conv_id) UNIQUE`、`idx_user_last(user_id, last_msg_at)`。
+
+`idx_user_last` 的列顺序不能反：列表查询是「按 user_id 过滤 + 按 last_msg_at 排序」，
+把 `last_msg_at` 放首列时过滤条件用不上索引，等于白交维护成本。
 
 ### 3.9 conversation_reads
 
@@ -245,7 +291,7 @@ Redis 的 `im:read:{uid}` hash 是热数据，DB 是回源与冷启动的兜底�
 | `status` | tinyint | `MomentStatusNormal(0)` / `MomentStatusDeleted(1)`，索引 |
 | `created_at` / `updated_at` | datetime | BaseModel |
 
-索引：`PRIMARY(id)`、`idx_user_created(user_id)`、`idx(status)`、`idx(created_at)`。
+索引：`PRIMARY(id)`、`idx_user_created(user_id)`、`idx(status)`。
 
 > `idx_user_created` 名字里有 created，实际只有 `user_id` 一列（`created_at` 来自 `BaseModel`，无法挂到具名复合索引上）。查询是 `WHERE user_id = ? ORDER BY id DESC`，InnoDB 二级索引自带主键后缀，等价于 `(user_id, id)`，够用；后续若真按 `created_at` 排序，需在实体上显式重写该字段。
 
@@ -283,7 +329,7 @@ Redis 的 `im:read:{uid}` hash 是热数据，DB 是回源与冷启动的兜底�
 |---|---|---|---|---|
 | users | PRIMARY | id | 主键 | 按 ID 取用户 |
 | users | idx_users_username | username | 唯一 | 登录、注册查重 |
-| users | idx_users_phone | phone | 普通 | 预留 |
+| users | uk_users_phone | phone | 唯一 | 预留，NULL 可重复 |
 | users | idx_users_status | status | 普通 | 后台筛账号 |
 | friends | uk_user_friend | user_id, friend_id | 唯一 | 好友列表、防重复 |
 | friend_requests | idx_from_to | from_user_id, to_user_id | 普通 | 我发出的申请 |
@@ -294,11 +340,10 @@ Redis 的 `im:read:{uid}` hash 是热数据，DB 是回源与冷启动的兜底�
 | groups | idx_groups_status | status | 普通 | 过滤已解散 |
 | group_members | uk_group_user | group_id, user_id | 唯一 | 成员去重、权限校验 |
 | group_members | idx_user_joined | user_id, joined_at | 普通 | 我加入的群 |
-| messages | idx_conv_seq | conv_id, seq | 普通 | 历史游标分页 |
+| messages | uk_conv_seq | conv_id, seq | 唯一 | 历史游标分页、seq 唯一 |
 | messages | uk_from_client | client_msg_id | 唯一 | 消息幂等兜底 |
 | messages | idx_messages_from_id | from_id | 普通 | 发送者维度查询 |
 | messages | idx_messages_group_id | group_id | 普通 | 群消息维度查询 |
-| messages | idx_messages_created_at | created_at | 普通 | 审计、归档 |
 | conversations | uk_user_conv | user_id, conv_id | 唯一 | 定位单个会话 |
 | conversations | idx_user_last | user_id, last_msg_at | 普通 | 会话列表排序 |
 | conversation_reads | uk_user_conv | user_id, conv_id | 唯一 | 定位已读位点 |
@@ -307,7 +352,8 @@ Redis 的 `im:read:{uid}` hash 是热数据，DB 是回源与冷启动的兜底�
 | moment_likes | uk_moment_user | moment_id, user_id | 唯一 | 点赞幂等 |
 | moment_comments | idx_moment_created | moment_id | 普通 | 取动态下评论 |
 
-每张表还有 `PRIMARY(id)` 与 `idx_created_at`（`BaseModel.CreatedAt` 的 `gorm:"index"` 自动生成）。
+每张表另有 `PRIMARY(id)`。**没有 `created_at` 单列索引**：见 2.1，所有查询都靠
+「等值列 + 主键游标」的组合索引，单列时间索引不会被走到，只增加写入成本。
 
 ---
 
@@ -331,8 +377,8 @@ Redis 的 `im:read:{uid}` hash 是热数据，DB 是回源与冷启动的兜底�
 - 为什么拆两步：若先 `INCR` 再修正，那条消息已经占用了 1 号，并发下别的请求会拿到 2，
   与库里历史 seq 重叠；先探测则不会消耗号段，所有并发请求由 `initSeqScript` 的
   `cur < floor` 条件收敛到同一段序号。
-- 客户端可用 seq 是否连续判断是否丢消息；`(conv_id, seq)` 目前**没有唯一约束**，
-  依赖上面这套分配逻辑保证唯一。
+- 客户端可用 seq 是否连续判断是否丢消息；`(conv_id, seq)` 上有 `uk_conv_seq` 唯一索引兜底，
+  分配逻辑一旦出错（删键、旧数据混入）会以 1062 当场暴露，而不是悄悄写入重复序号。
 
 ### 5.3 私聊写扩散 vs 群聊读扩散
 
@@ -362,58 +408,3 @@ Redis 的 `im:read:{uid}` hash 是热数据，DB 是回源与冷启动的兜底�
 | `groups.last_msg_*` | `messages` 最新一条 | 与消息插入同事务，`WHERE last_msg_seq < ?` 防回退 |
 | `conversations.last_msg_*` | 同上 | 同上 |
 | `moments.like_count` / `comment_count` | 明细表行数 | 与明细增删同事务，`GREATEST(...,0)` 防负 |
-
----
-
-## 六、已知问题与待办
-
-### 6.1 已修复
-
-1. `messages` 未嵌入 `BaseModel`，`BeforeCreate` 兜底失效、撤回没有 `updated_at`。
-   现已统一嵌入，并删除 `Send` 里手动 `snowflake.Next()` 的赋值。
-2. `MaxSeq` 无调用方（死代码），同时 `NextSeq` 是裸 `INCR`，Redis 丢键后 seq 从 1 重来
-   与历史重叠。现已改为「探测 + 回源初始化」，两块一起解决。
-3. `moments.status` 用魔法数字 0/1，现已补 `MomentStatusNormal` / `MomentStatusDeleted`。
-4. `conversations.idx_user_last` 缺 `user_id` 首列，导致会话列表排序用不上该索引，已在 tag 修正。
-
-### 6.2 仍存在
-
-1. **`AutoMigrate` 只加不改**。6.1 第 1 条会让存量 `messages` 表新增 `updated_at` 列，
-   第 4 条则完全不会生效（同名索引已存在时 GORM 直接跳过），需要手工处理：
-
-   ```sql
-   -- 会话列表索引补上 user_id 首列；改完重启服务由 AutoMigrate 重建
-   ALTER TABLE conversations DROP INDEX idx_user_last;
-   ```
-
-   删除前先 `SHOW INDEX FROM conversations;` 确认索引存在，缺失时 `DROP` 会报错。
-   `messages` 数据量大时，加列请安排在低峰期，MySQL 8.0 的 `ALGORITHM=INSTANT` 可避免锁表。
-
-2. **`(conv_id, seq)` 无唯一约束**。分配逻辑出错（例如人为删了 Redis 键、或老数据来自
-   更早版本）时 DB 不会拦重复 seq。补唯一索引前要先跑一遍聚合确认存量无重复：
-
-   ```sql
-   SELECT conv_id, seq, COUNT(*) FROM messages GROUP BY conv_id, seq HAVING COUNT(*) > 1;
-   ```
-
-3. **`messages.extra` 无长度校验**。列是 `varchar(1024)`，超长在严格模式下直接报 1406，
-   前端收到 500。建议在 `validateContent` 里按字节校验。
-4. **`users.phone` 未启用且非唯一索引**。将来若做手机号登录，不能直接加 `uniqueIndex`：
-   现有数据里 `phone` 多为空串，唯一索引会让第二条空串插入失败，需要先改成
-   `NULL` 默认值再建索引。
-5. **`PublicUser` 对外暴露 `username`**。好友列表、搜索结果、点赞列表都会带出对方的登录名。
-   当前产品形态下等同于 QQ 号的定位，若要收敛隐私，需前端同步改 `nickname` 兜底逻辑
-   （`web/index.html` 有多处 `@${username}` 展示）。
-6. **`moment_comments` 物理删除，`parent_id` 可能悬空**。删一级评论后子回复仍保留，
-   但父节点已不存在，前端会渲染不出上下文；`comment_count` 也只减 1，不级联。
-   若要级联，需要在 `DeleteComment` 里按 `parent_id` 递归或一次性删除并扣减对应数量。
-7. **每张表的 `created_at` 单列索引对大表是纯写放大**。`messages` 的查询全部带
-   `conv_id`，`idx_messages_created_at` 基本不会被用到。若做容量优化，可把
-   `BaseModel.CreatedAt` 的 `index` 去掉，但会影响审计类查询，需逐个确认。
-
-### 6.3 加字段时的注意事项
-
-- `int64` 一律带 `json:",string"`，切片用 `jsonx.Int64List`（`,string` 对 slice 不生效）。
-- 布尔开关若要区分「未传」与「false」，用 `*bool`，不要用 `binding:"required"`。
-- 新增 `NOT NULL` 列必须给 default，否则 AutoMigrate 对存量行会填零值或失败。
-- 新增索引请显式命名并关注列顺序：等值过滤列在前，排序列在后。

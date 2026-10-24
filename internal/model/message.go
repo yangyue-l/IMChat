@@ -8,19 +8,25 @@ import "time"
 //
 // 嵌入 BaseModel 而不是自己重复声明 ID/CreatedAt：否则 BeforeCreate 兜底失效，
 // 每个新写入路径都得手动分配雪花 ID；且撤回时没有 UpdatedAt 记录操作时间。
+//
+// uk_conv_seq 是唯一索引而不只是普通索引：seq 的唯一性原本只靠 Redis 的分配逻辑，
+// 一旦人为删键、清库或旧版本数据混入，重复 seq 会让客户端把新消息当旧消息丢掉，
+// 且没有任何信号。落到 DB 层后，重复写入直接报 1062，问题当场暴露。
 type Message struct {
 	BaseModel
-	ConvID      string `gorm:"size:64;not null;index:idx_conv_seq,priority:1" json:"conv_id"`
+	ConvID      string `gorm:"size:64;not null;uniqueIndex:uk_conv_seq,priority:1" json:"conv_id"`
 	ConvType    int8   `gorm:"not null" json:"conv_type"`
-	Seq         int64  `gorm:"not null;index:idx_conv_seq,priority:2" json:"seq"`
+	Seq         int64  `gorm:"not null;uniqueIndex:uk_conv_seq,priority:2" json:"seq"`
 	FromID      int64  `gorm:"not null;index" json:"from_id,string"`
 	ToID        int64  `gorm:"not null;default:0" json:"to_id,string"` // 私聊接收方，群聊为 0
 	GroupID     int64  `gorm:"not null;default:0;index" json:"group_id,string"`
 	ClientMsgID string `gorm:"size:64;not null;uniqueIndex:uk_from_client" json:"client_msg_id"`
 	MsgType     int8   `gorm:"not null;default:1" json:"msg_type"`
 	Content     string `gorm:"type:text" json:"content"`
-	Extra       string `gorm:"type:varchar(1024)" json:"extra,omitempty"` // 图片宽高、文件名等扩展信息
-	Status      int8   `gorm:"not null;default:0" json:"status"`
+	// Extra 列宽 varchar(1024)，service 层按字节校验 maxExtraBytes 后才落库，
+	// 否则超长在严格模式下直接报 1406，前端只会看到一个 500。
+	Extra  string `gorm:"type:varchar(1024)" json:"extra,omitempty"`
+	Status int8   `gorm:"not null;default:0" json:"status"`
 }
 
 // TableName 固定表名。

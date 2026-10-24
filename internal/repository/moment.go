@@ -170,9 +170,19 @@ func (r *MomentRepo) GetComment(ctx context.Context, id int64) (*model.MomentCom
 	return &c, err
 }
 
-// DelComment 删除评论。
+// DelComment 删除单条评论。
 func (r *MomentRepo) DelComment(ctx context.Context, id, uid int64) (bool, error) {
 	res := r.db.WithContext(ctx).
 		Where("id = ? AND user_id = ?", id, uid).Delete(&model.MomentComment{})
 	return res.RowsAffected > 0, res.Error
+}
+
+// DelCommentReplies 删除挂在某条评论下的全部回复，返回实际删除条数。
+//
+// 不带 user_id 条件：一级评论作者删掉自己的评论后，别人挂在它下面的回复就没有
+// 上下文了，留着只会渲染成一串没有归属的碎片，所以整棵子树一起删。
+func (r *MomentRepo) DelCommentReplies(ctx context.Context, parentID int64) (int64, error) {
+	res := r.db.WithContext(ctx).
+		Where("parent_id = ?", parentID).Delete(&model.MomentComment{})
+	return res.RowsAffected, res.Error
 }

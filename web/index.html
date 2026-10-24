@@ -451,7 +451,7 @@ $('logoutBtn').onclick = () => {
 async function enterApp() {
   $('login').style.display = 'none';
   $('app').classList.add('on');
-  $('meName').textContent = state.me.nickname || state.me.username;
+  $('meName').textContent = state.me.nickname;
   $('meAvatarWrap').innerHTML = avatarHtml(state.me.nickname, state.me.avatar, 'avatar');
   connectWS();
   await loadAll();
@@ -798,7 +798,7 @@ function renderContacts() {
         ${avatarHtml(f.nickname, f.avatar, 'avatar')}
         <div class="item-main">
           <div class="item-name">${esc(f.remark || f.nickname)}${f.starred ? ' ★' : ''}</div>
-          <div class="item-sub">@${esc(f.username)}</div>
+          ${f.signature ? `<div class="item-sub">${esc(f.signature)}</div>` : ''}
         </div>
         <button class="icon-btn" onclick="event.stopPropagation();toggleBlock('${f.id}', true)" title="拉黑">⊘</button>
       </div>`).join('') || '<div class="empty" style="padding:16px">还没有好友</div>'}
@@ -922,7 +922,7 @@ async function openBlacklist() {
     ${state.blocked.length ? state.blocked.map((u) => `
       <div class="item">
         ${avatarHtml(u.nickname, u.avatar, 'avatar sm')}
-        <div class="item-main"><div class="item-name">${esc(u.nickname)}</div><div class="item-sub">@${esc(u.username)}</div></div>
+        <div class="item-main"><div class="item-name">${esc(u.nickname)}</div>${u.signature ? `<div class="item-sub">${esc(u.signature)}</div>` : ''}</div>
         <button class="btn sm ghost" onclick="unblock('${u.id}')">解除</button>
       </div>`).join('') : '<div class="empty">黑名单是空的</div>'}
     <div class="row" style="margin-top:16px"><div class="spacer"></div><button class="btn sm ghost" onclick="closeModal()">关闭</button></div>

@@ -26,6 +26,7 @@ type MessageService struct {
 // 业务约束。
 const (
 	maxContentRunes  = 5000
+	maxExtraBytes    = 1024 // 与 messages.extra 的列宽一致，超长会撞 MySQL 1406
 	historyPageLimit = 50
 	recallWindow     = 2 * time.Minute
 )
@@ -245,10 +246,16 @@ func (s *MessageService) persistAndDeliver(ctx context.Context, sc *sendContext)
 		return s.deps.Groups.WithTx(tx).UpdateLastMessage(ctx, sc.groupID, msg, preview, now)
 	})
 	if err != nil {
+		// 1062 有两个来源，必须分开处理：
+		//   - uk_from_client：并发重复投递，回查到已落库的消息直接返回，语义上等同于成功；
+		//   - uk_conv_seq：序号被抢占（Redis 丢键、人为删键或旧数据混入），回查不到消息。
+		//     此时计数器已经越过冲突值，客户端拿同一个 client_msg_id 重试就会分配到
+		//     新序号并成功，所以回一条可重试的冲突，而不是让它变成看不懂的 500。
 		if isDuplicateKey(err) {
 			if existing := s.findByClientMsgID(ctx, sc.from, sc.req.ClientMsgID); existing != nil {
 				return existing, nil
 			}
+			return nil, resp.WithMsg(resp.ErrConflict, "消息序号冲突，请重试")
 		}
 		return nil, err
 	}
@@ -637,6 +644,11 @@ func validateContent(req SendReq) error {
 	}
 	if utf8.RuneCountInString(req.Content) > maxContentRunes {
 		return resp.WithMsg(resp.ErrInvalidParam, "消息内容过长")
+	}
+	// extra 落的是 varchar(1024)，这里按字节数卡：严格模式下超长是 1406 错误，
+	// 抛到 handler 就成了 500，前端拿不到「你传的东西太大」这种可行动的信息。
+	if len(req.Extra) > maxExtraBytes {
+		return resp.WithMsg(resp.ErrInvalidParam, "扩展信息过长")
 	}
 	if strings.TrimSpace(req.Content) == "" && req.MsgType == model.MsgText {
 		return resp.WithMsg(resp.ErrInvalidParam, "消息内容不能为空")

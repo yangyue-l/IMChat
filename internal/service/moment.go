@@ -353,6 +353,9 @@ func (s *MomentService) Comment(ctx context.Context, uid, momentID int64, conten
 }
 
 // DeleteComment 删除评论，仅评论者或动态作者可删。
+//
+// 删一级评论时连带删掉它下面的回复：只删父节点会让 parent_id 悬空，
+// 前端渲染不出上下文；计数也必须按实际删除条数扣，否则 comment_count 会虚高。
 func (s *MomentService) DeleteComment(ctx context.Context, uid, commentID int64) error {
 	c, err := s.deps.Moments.GetComment(ctx, commentID)
 	if err != nil || c == nil {
@@ -371,7 +374,11 @@ func (s *MomentService) DeleteComment(ctx context.Context, uid, commentID int64)
 		if err != nil || !removed {
 			return err
 		}
-		return repo.IncrCounters(ctx, c.MomentID, 0, -1)
+		replies, err := repo.DelCommentReplies(ctx, commentID)
+		if err != nil {
+			return err
+		}
+		return repo.IncrCounters(ctx, c.MomentID, 0, -int(1+replies))
 	})
 }
 

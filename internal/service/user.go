@@ -50,9 +50,14 @@ type LoginResult struct {
 }
 
 // UserSearchItem 搜索结果，附带与当前用户的好友关系。
+//
+// Username 在这里显式回传：搜索本身是按账号或昵称匹配的，结果里不带登录名
+// 就分不清两个同名用户，用户也没法确认搜到的是不是想找的那个人。
+// 除搜索之外的任何投影都不带它。
 type UserSearchItem struct {
 	model.PublicUser
-	IsFriend bool `json:"is_friend"`
+	Username string `json:"username"`
+	IsFriend bool   `json:"is_friend"`
 }
 
 // UpdateProfileReq 可修改的资料字段，指针用于区分「未传」与「传空」。
@@ -244,7 +249,11 @@ func (s *UserService) Search(ctx context.Context, uid int64, keyword string, lim
 			continue
 		}
 		_, isFriend := friendSet[list[i].ID]
-		out = append(out, UserSearchItem{PublicUser: list[i].ToPublic(), IsFriend: isFriend})
+		out = append(out, UserSearchItem{
+			PublicUser: list[i].ToPublic(),
+			Username:   list[i].Username,
+			IsFriend:   isFriend,
+		})
 		if len(out) >= limit {
 			break
 		}

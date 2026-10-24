@@ -14,9 +14,14 @@ import (
 )
 
 // BaseModel 提供雪花主键与时间戳；插入前自动分配 ID，避免业务层重复赋值。
+//
+// CreatedAt 故意不加 index：全库没有一条查询按 created_at 过滤或排序，
+// 列表一律是「等值列 + 主键游标」（user_id + id、conv_id + seq、user_id + last_msg_at）。
+// 12 张表各挂一个用不到的单列索引，换来的是每次写入多一次 B+ 树维护，
+// 对 messages 这种写多读少的大表是纯损耗。
 type BaseModel struct {
 	ID        int64     `gorm:"primaryKey;autoIncrement:false" json:"id,string"`
-	CreatedAt time.Time `gorm:"index" json:"created_at"`
+	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
