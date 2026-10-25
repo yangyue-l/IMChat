@@ -11,20 +11,29 @@ import (
 	"gorm.io/gorm"
 
 	"imchat/internal/cache"
-	"imchat/internal/config"
 	"imchat/internal/pkg/jwt"
 	"imchat/internal/repository"
 )
 
 // Pusher 是 WebSocket 推送能力的抽象。
 // service 只依赖接口，不依赖 ws 包，避免双向依赖；单机与集群由 Hub 内部实现差异。
+//
+// 故意不暴露「本节点是否在线」：service 判定在线必须走 Presence，
+// 本节点未命中不代表人不在线（集群下消息由总线送到其他节点）。
 type Pusher interface {
 	// PushToUser 推送给某用户的所有本节点连接，返回推送成功的连接数。
 	PushToUser(uid int64, payload []byte) int
 	// PushToUsers 批量推送，内部按分片聚合，避免逐用户加锁。
 	PushToUsers(uids []int64, payload []byte) int
-	// LocalOnline 判断该用户是否连在本节点。
-	LocalOnline(uid int64) bool
+}
+
+// Presence 是在线状态查询能力的抽象，由 ws.Hub 实现。
+// 单机直接读本地连接表，集群模式本地未命中时才回源 Redis —— 差异全在实现里，
+// 调用方不需要知道自己跑在哪种模式上。
+type Presence interface {
+	// Online 返回这批用户里在线的那些，map 中存在的 uid 即为在线。
+	// 实现失败时返回 error 而不是空 map：调用方需要能区分「不在线」与「查不到」。
+	Online(uids []int64) (map[int64]bool, error)
 }
 
 // Event 是投递到消息队列的异步事件。
@@ -33,11 +42,11 @@ type Event struct {
 	Data json.RawMessage `json:"data"`
 }
 
-// 事件类型常量。
+// 事件类型常量。新增事件必须同时在 cmd/server 里 Register 处理器，
+// 只定义常量不注册等于生产者往空气里投消息。
 const (
 	EventMomentFanout  = "moment.fanout"   // 朋友圈动态写扩散
 	EventOfflineNotify = "message.offline" // 离线消息通知
-	EventFriendRequest = "friend.request"  // 好友申请提醒
 )
 
 // Publisher 是消息队列生产者的抽象，未启用 MQ 时由本地实现兜底。
@@ -47,12 +56,12 @@ type Publisher interface {
 
 // Deps 汇总 service 依赖，由 main 统一装配。
 type Deps struct {
-	DB     *gorm.DB
-	Cache  *cache.Cache
-	JWT    *jwt.Manager
-	Cfg    *config.Config
-	Pusher Pusher
-	Pub    Publisher
+	DB       *gorm.DB
+	Cache    *cache.Cache
+	JWT      *jwt.Manager
+	Pusher   Pusher
+	Presence Presence
+	Pub      Publisher
 
 	Users    *repository.UserRepo
 	Friends  *repository.FriendRepo
@@ -75,7 +84,7 @@ type Services struct {
 func New(d Deps) *Services {
 	rel := &relation{cache: d.Cache, friends: d.Friends, groups: d.Groups, users: d.Users}
 	return &Services{
-		User:    &UserService{deps: d},
+		User:    &UserService{deps: d, rel: rel},
 		Friend:  &FriendService{deps: d, rel: rel},
 		Group:   &GroupService{deps: d, rel: rel},
 		Message: &MessageService{deps: d, rel: rel},
@@ -161,12 +170,3 @@ func (f Frame) Encode() []byte {
 	}
 	return b
 }
-
-// nilPublisher 在 MQ 关闭时使用，直接丢弃事件并记录，保证主流程不受影响。
-type nilPublisher struct{}
-
-// Publish 空实现。
-func (nilPublisher) Publish(context.Context, Event) error { return nil }
-
-// NilPublisher 返回空生产者。
-func NilPublisher() Publisher { return nilPublisher{} }

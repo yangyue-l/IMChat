@@ -28,11 +28,12 @@ type SendFriendReq struct {
 	Message  string `json:"message"`
 }
 
-// FriendItem 好友列表项，包含备注与对方资料。
+// FriendItem 好友列表项，包含备注、对方资料与在线状态。
 type FriendItem struct {
 	model.PublicUser
 	Remark    string    `json:"remark"`
 	Starred   bool      `json:"starred"`
+	Online    bool      `json:"online"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -189,7 +190,6 @@ func (s *FriendService) HandleRequest(ctx context.Context, uid, requestID int64,
 	}
 
 	s.rel.InvalidateFriend(ctx, req.FromUserID, req.ToUserID)
-	_ = s.deps.Cache.DelFriendIDs(ctx, req.FromUserID, req.ToUserID)
 
 	if accept {
 		me, _ := s.deps.Users.GetByID(ctx, uid)
@@ -216,6 +216,14 @@ func (s *FriendService) List(ctx context.Context, uid int64) ([]FriendItem, erro
 	if err != nil {
 		return nil, err
 	}
+	// 在线态一次批量取：单机是纯内存扫描，集群也只多一次 pipeline 往返。
+	// 它只是列表里的一项装饰，查不到就都按离线显示 —— 不能让这个辅助字段
+	// 把整个好友列表拖成 500。要单看某人是否在线请走 /users/:id/online，
+	// 那里查不到会明确报错。
+	var online map[int64]bool
+	if s.deps.Presence != nil {
+		online, _ = s.deps.Presence.Online(ids)
+	}
 	out := make([]FriendItem, 0, len(rows))
 	for _, r := range rows {
 		u, ok := users[r.FriendID]
@@ -226,6 +234,7 @@ func (s *FriendService) List(ctx context.Context, uid int64) ([]FriendItem, erro
 			PublicUser: u,
 			Remark:     r.Remark,
 			Starred:    r.Starred,
+			Online:     online[r.FriendID],
 			CreatedAt:  r.CreatedAt,
 		})
 	}
@@ -241,7 +250,6 @@ func (s *FriendService) Delete(ctx context.Context, uid, friendID int64) error {
 		return err
 	}
 	s.rel.InvalidateFriend(ctx, uid, friendID)
-	_ = s.deps.Cache.DelFriendIDs(ctx, uid, friendID)
 	return nil
 }
 
@@ -277,7 +285,6 @@ func (s *FriendService) Block(ctx context.Context, uid, targetID int64) error {
 		return err
 	}
 	s.rel.InvalidateFriend(ctx, uid, targetID)
-	_ = s.deps.Cache.DelBlockedIDs(ctx, uid)
 	return nil
 }
 
@@ -287,7 +294,6 @@ func (s *FriendService) Unblock(ctx context.Context, uid, targetID int64) error 
 		return err
 	}
 	s.rel.InvalidateFriend(ctx, uid, targetID)
-	_ = s.deps.Cache.DelBlockedIDs(ctx, uid)
 	return nil
 }
 

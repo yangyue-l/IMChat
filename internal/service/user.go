@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
+	"imchat/internal/cache"
 	"imchat/internal/model"
 	"imchat/internal/pkg/resp"
 )
@@ -26,6 +28,7 @@ const (
 // UserService 用户与认证相关业务。
 type UserService struct {
 	deps Deps
+	rel  *relation
 }
 
 // RegisterReq 注册参数。
@@ -173,10 +176,15 @@ func (s *UserService) Profile(ctx context.Context, uid int64) (*model.PublicUser
 			return nil, err
 		}
 		if u == nil {
-			return nil, resp.ErrNotFound
+			// 必须回 cache.ErrNotFound 这个哨兵：Remember 只认它才会写空值占位，
+			// 回 resp.ErrNotFound 的话「查一个不存在的 uid」每次都会打穿到 DB。
+			return nil, cache.ErrNotFound
 		}
 		return json.Marshal(u.ToPublic())
 	})
+	if errors.Is(err, cache.ErrNotFound) {
+		return nil, resp.WithMsg(resp.ErrNotFound, "用户不存在")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -185,6 +193,42 @@ func (s *UserService) Profile(ctx context.Context, uid int64) (*model.PublicUser
 		return nil, err
 	}
 	return &p, nil
+}
+
+// Online 查询某用户是否有任意设备在线。
+//
+// 可见性对齐朋友圈（MomentService.UserMoments）：先看拉黑、再看好友。
+// 只判好友是不够的 —— 拉黑不解除好友关系，那样「拉黑之后对方还能看到我此刻在线」，
+// 与拉黑本身的语义相悖。不加限制更糟：遍历 uid 就能探测谁在线、什么时段在线，
+// 等于一份公开的作息画像。两个关系判定都走 5 分钟缓存，不会额外压库。
+func (s *UserService) Online(ctx context.Context, viewerID, targetID int64) (bool, error) {
+	if s.deps.Presence == nil {
+		// 未装配在线能力（单测、只装了 DB 的工具链）时按离线降级，不 panic。
+		// 放在关系校验之前：能力都没有，没必要白查一次好友关系。
+		return false, nil
+	}
+	if viewerID != targetID {
+		blocked, err := s.rel.EitherBlocked(ctx, viewerID, targetID)
+		if err != nil {
+			return false, err
+		}
+		if blocked {
+			return false, resp.WithMsg(resp.ErrForbidden, "只能查看好友的在线状态")
+		}
+		isFriend, err := s.rel.AreFriends(ctx, viewerID, targetID)
+		if err != nil {
+			return false, err
+		}
+		if !isFriend {
+			return false, resp.WithMsg(resp.ErrForbidden, "只能查看好友的在线状态")
+		}
+	}
+
+	online, err := s.deps.Presence.Online([]int64{targetID})
+	if err != nil {
+		return false, err
+	}
+	return online[targetID], nil
 }
 
 // UpdateProfile 修改资料并失效缓存。

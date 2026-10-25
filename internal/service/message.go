@@ -184,9 +184,10 @@ func (s *MessageService) persistAndDeliver(ctx context.Context, sc *sendContext)
 
 	// 2. 分配会话内序号，Redis 单线程执行脚本保证严格递增。
 	//
-	// 返回 0 说明序号键不存在：要么是新会话的第一条消息，要么 Redis 重启/淘汰
-	// 把键弄丢了。后者若不处理，seq 会从 1 与库里历史重叠，客户端的断档判断
-	// 就此失效，所以统一回源一次 MAX(seq) 再原子初始化，两种情况都走同一条路径。
+	// 返回 0 说明序号键不存在，有三种来源：新会话的第一条消息、Redis 重启/淘汰
+	// 弄丢了键、以及 seqTTL 到期被回收。三者若不处理，seq 会从 1 与库里历史重叠，
+	// 客户端的断档判断就此失效，所以统一回源一次 MAX(seq) 再原子初始化，
+	// 三种情况都走同一条路径 —— 也就是说这条回源分支是常态，不是异常兜底。
 	seq, err := s.deps.Cache.NextSeq(ctx, sc.convID)
 	if err != nil {
 		return nil, err
@@ -248,7 +249,7 @@ func (s *MessageService) persistAndDeliver(ctx context.Context, sc *sendContext)
 	if err != nil {
 		// 1062 有两个来源，必须分开处理：
 		//   - uk_from_client：并发重复投递，回查到已落库的消息直接返回，语义上等同于成功；
-		//   - uk_conv_seq：序号被抢占（Redis 丢键、人为删键或旧数据混入），回查不到消息。
+		//   - uk_conv_seq：序号被抢占（seq 键过期后的回源窗口、人为删键或旧数据混入），回查不到消息。
 		//     此时计数器已经越过冲突值，客户端拿同一个 client_msg_id 重试就会分配到
 		//     新序号并成功，所以回一条可重试的冲突，而不是让它变成看不懂的 500。
 		if isDuplicateKey(err) {
@@ -278,24 +279,35 @@ func (s *MessageService) persistAndDeliver(ctx context.Context, sc *sendContext)
 	}
 	dto := toDTO(msg, fromPublic)
 	payload := NewFrame(FrameMessage, dto).Encode()
+	delivered := 0
 	if len(sc.receivers) > 0 {
-		s.deps.Pusher.PushToUsers(sc.receivers, payload)
+		delivered = s.deps.Pusher.PushToUsers(sc.receivers, payload)
 	}
 
-	// 6. 离线补偿：全部接收者都不在线时投递到 MQ，由消费者做离线通知
-	if len(sc.receivers) > 0 && !s.anyLocalOnline(sc.receivers) {
+	// 6. 离线补偿：本地一条都没投出去，且集群里也没人在线时才投 MQ。
+	// delivered > 0 就说明有人在收，不必再问一次 Redis。
+	if len(sc.receivers) > 0 && delivered == 0 && !s.anyRemoteOnline(ctx, sc.receivers) {
 		s.publishOffline(ctx, msg)
 	}
 	return dto, nil
 }
 
-func (s *MessageService) anyLocalOnline(uids []int64) bool {
-	for _, uid := range uids {
-		if s.deps.Pusher.LocalOnline(uid) {
-			return true
-		}
+// anyRemoteOnline 判断接收者里是否有人在线的权威版本。
+//
+// 不能只看本节点：集群模式下消息由 Redis 总线送到其他节点，本地未命中不代表
+// 人不在线，据本地判定就会给在线用户发离线通知。单机/集群的差异由 Presence
+// 内部消化，这里不需要再关心部署模式。
+// 查询失败时按「在线」处理：状态未知宁可不发离线通知，也不要重复打扰用户。
+func (s *MessageService) anyRemoteOnline(ctx context.Context, uids []int64) bool {
+	if s.deps.Presence == nil {
+		return false
 	}
-	return false
+	online, err := s.deps.Presence.Online(uids)
+	if err != nil {
+		slog.Warn("查询在线状态失败，跳过离线通知", "count", len(uids), "err", err)
+		return true
+	}
+	return len(online) > 0
 }
 
 func (s *MessageService) publishOffline(ctx context.Context, msg *model.Message) {
@@ -306,7 +318,11 @@ func (s *MessageService) publishOffline(ctx context.Context, msg *model.Message)
 	if err != nil {
 		return
 	}
-	_ = s.deps.Pub.Publish(ctx, Event{Type: EventOfflineNotify, Data: data})
+	// 事件投递失败不影响发消息本身，但必须留痕：静默吞掉的话，
+	// MQ 抖动期间丢了多少离线通知永远查不出来。
+	if err := s.deps.Pub.Publish(ctx, Event{Type: EventOfflineNotify, Data: data}); err != nil {
+		slog.Warn("离线通知事件投递失败", "conv_id", msg.ConvID, "seq", msg.Seq, "err", err)
+	}
 }
 
 // findByClientMsgID 幂等回查。
