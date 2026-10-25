@@ -150,7 +150,10 @@ type Hub struct {
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
 	connCount atomic.Int64
-	msgCount  atomic.Int64
+	// 上行收帧与下行发帧分开计数：合成一个计数器时，只能看到「总量」，
+	// 无法判断积压是在读侧还是写侧（比如广播量大但客户端读得慢）。
+	recvFrames atomic.Int64
+	sentFrames atomic.Int64
 }
 
 // NewHub 创建连接中心。shards 必须为 2 的幂，便于用位运算取模。
@@ -354,8 +357,14 @@ func (h *Hub) markOffline(ctx context.Context, uid int64, device string) {
 // OnlineCount 返回本节点连接总数。
 func (h *Hub) OnlineCount() int64 { return h.connCount.Load() }
 
-// SentFrames 返回已下发帧计数，用于监控吞吐。
-func (h *Hub) SentFrames() int64 { return h.msgCount.Load() }
+// RecvFrames 返回已接收的上行帧计数。
+//
+// 只统计客户端发来的业务帧，不含 Pong 等控制帧：心跳频率由服务端配置决定，
+// 混进来会让「收帧数」变成连接数 × 心跳频率的函数，看不出真实上行压力。
+func (h *Hub) RecvFrames() int64 { return h.recvFrames.Load() }
+
+// SentFrames 返回已成功写出的下行帧计数，用于监控推送吞吐。
+func (h *Hub) SentFrames() int64 { return h.sentFrames.Load() }
 
 // publishBus 把广播消息投入队列。队列满时退化为同步发送，宁可多等一次 RTT 也不丢广播。
 func (h *Hub) publishBus(uids []int64, payload []byte) {

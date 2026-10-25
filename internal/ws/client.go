@@ -81,7 +81,7 @@ func (c *Client) readLoop() {
 			}
 			return
 		}
-		c.hub.msgCount.Add(1)
+		c.hub.recvFrames.Add(1)
 
 		// 每连接令牌桶限流，挡住刷屏与恶意构造
 		if !c.limiter.Allow() {
@@ -111,6 +111,9 @@ func (c *Client) writeLoop() {
 				c.log.Debug("写帧失败", "err", err)
 				return
 			}
+			// 只统计业务帧：Ping 是对每条连接按心跳间隔固定产生的，
+			// 计入会让该指标变成「连接数 × 心跳频率」，掩盖真实的推送量。
+			c.hub.sentFrames.Add(1)
 		case <-ticker.C:
 			_ = c.conn.SetWriteDeadline(time.Now().Add(cfg.WSWriteWait.Get()))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {

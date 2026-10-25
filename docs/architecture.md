@@ -329,7 +329,7 @@ Redis 与 MySQL 无法同事务，只能选一个方向保证：
 
 ```bash
 go run ./cmd/smoke -base http://127.0.0.1:8080          # 功能回归（45 项）
-curl http://127.0.0.1:8080/metrics                      # 在线连接、goroutine、堆内存
+curl http://127.0.0.1:8080/metrics                      # 在线连接、上下行帧数、goroutine、堆内存
 go tool pprof http://127.0.0.1:8080/debug/pprof/profile?seconds=30
 ```
 
