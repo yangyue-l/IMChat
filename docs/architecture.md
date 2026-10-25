@@ -65,12 +65,12 @@ handler ──▶ service.SendPrivate
               │      uk(from_id, client_msg_id) 兜住并发重复
               │
               ├─5 会话：UpsertConversations(批量 ON DUPLICATE KEY UPDATE)
-              │      Redis pipeline HINCRBY 未读数
+              │      Redis Lua HINCRBY 未读数 + 续期
               │
               ├─6 推送：序列化一次 → Hub.PushToUsers
               │      按 uid 哈希分片 → 每片一次 RLock → 非阻塞入队
               │
-              └─7 离线补偿：全部接收者离线 → RabbitMQ 事件
+              └─7 离线补偿：本地未投出 且 集群无人在线 → RabbitMQ 事件
   │
   ▼
 返回完整消息（含 server id 与 seq）
@@ -123,7 +123,14 @@ shard := shards[x & 63]
 
 `cluster.enabled=true` 时：
 
-1. 连接建立 / 心跳时把 `uid+device` 写入 Redis Set（带 TTL，进程崩溃不会留脏数据）。
+1. 连接建立 / 心跳时把 `uid+device` 写进 `im:online:{uid}`（**zset**，score 是该设备自己的过期时刻，
+   按设备独立过期，不用整 key TTL —— 否则一台设备心跳就给已断开的设备无限续命）。
+   续期每 2 次心跳一次（30s × 2 = 60s），TTL 取 `2 个续期间隔 + 1 个心跳间隔`（150s），
+   容得下**一次**续期失败；连接退出只清理自己那一份，被顶号的旧连接不会误删新连接的记录。
+   单机模式不写这份状态（本地分片就是权威），所以判定入口只有一个：`Hub.Online(uids)`
+   （实现 `service.Presence`）。它先扫本地分片，命中即在线；只有「本地未命中 + 开了集群」
+   才把剩下的人一次性 pipeline 回源 `cache.OnlineSet`，好友列表、群消息扇出共用这一条路径，
+   N 个人也只多一次往返。回源失败会返回 error 而不是「全都不在线」——两者必须能区分。
 2. 推送先本地投递，再 `PUBLISH im:bus`，消息带 `origin` 节点标识。
 3. 各节点订阅总线，收到后跳过自己发的，只推本节点连接。
 
@@ -231,11 +238,24 @@ shard := shards[x & 63]
 | 拓扑 | `im.events`（direct）→ `im.events.q`，绑定各事件 routing key |
 | 死信 | `im.dlx` → `im.events.dlq` |
 | 生产 | channel 池（默认 8），publisher confirm，`DeliveryMode=persistent` |
-| 消费 | 手动 ACK，`prefetch=100`，单条处理超时 15s |
+| 自愈 | 连接断开由后台 `NotifyClose` 监听触发，指数退避重连（1s→30s），重连后重建池 |
+| 消费 | 每个 worker 独占一条 channel（各自 `Qos`+`Consume`），手动 ACK，单条超时 15s |
+| 并发 | `consumer_workers`（默认 3）；未确认消息总量 = `prefetch × workers` |
 | 重试 | 重新发布并累加 `x-retry`，超过 3 次转死信 |
+
+**为什么并发靠多 channel 而不是多 goroutine**：`amqp.Channel` 不是并发安全的，
+一条 channel 上做并发消费只能串行化，等于没加并发。所以 worker 数 = channel 数。
 
 **踩坑记录**：`Nack(requeue=true)` 不会修改消息 header，靠它做重试计数会导致
 `x-retry` 永远是 0，形成无限重试。必须重新 publish 一条带新 header 的消息再 ACK 原消息。
+
+**踩坑记录**：`x-retry` 的整数类型由**发送方**决定（本端发 `int32`，其他语言客户端常发
+`int64`，JSON 中转会是 `float64`）。只断言一种类型会退化成 0，同样变成无限重试，
+因此解析处按类型 switch 兜底。
+
+**踩坑记录**：生产者早期没有重连，`Consumer` 有重连而 `Producer` 没有——broker 抖动一次，
+之后所有 `Publish` 永久失败，而调用方大多只 Warn 或忽略错误，事件静默丢失。
+现在是两侧都有退避重连，且 `Publish` 在重连窗口内快速失败，不阻塞业务主流程。
 
 MQ 未启用（`rabbitmq.enabled=false`）时自动降级为本地内存总线：
 同一个 `Registry` 注册处理器，单 worker 串行消费，缓冲满则丢弃并计数。
@@ -253,13 +273,16 @@ Pipeline 只省往返，既不是事务也不保证全部执行，下列场景�
 
 | 操作 | 拆开写的后果 | 脚本做的事 |
 |---|---|---|
-| 上报已读 | 裸 `HSET` 会让已读序号回退，群未读按 `last_seq − read_seq` 实时算，立刻反弹；序号前进而清未读失败，私聊角标一直挂着 | `HSET` 取 `max(旧值, 新值)`，同时 `HDEL` 未读，返回最终序号 |
+| 上报已读 | 裸 `HSET` 会让已读序号回退，群未读按 `last_seq − read_seq` 实时算，立刻反弹；序号前进而清未读失败，私聊角标一直挂着 | `HSET` 取 `max(旧值, 新值)`，同时 `HDEL` 未读、`PEXPIRE` 续期，返回最终序号 |
+| 会话序号 | `INCR` 成功而 `PEXPIRE` 丢失，键回到永久驻留，一个会话一条、随会话数线性增长且没有任何回收机制 | `INCR` 后立即 `PEXPIRE`（7 天滑动）；过期由 `MAX(seq)` 回源重建，只多一次查询、不丢正确性 |
 | 分布式限流 | ①`INCR` 成功而 `EXPIRE` 丢失，key 无 TTL，计数单调递增，该用户被**永久限流**；②先读计数再判断再写，并发下会超发；③固定窗口在窗口边界能漏出双倍额度 | zset 存放行时刻，一次脚本内完成「清理滑出窗口的记录 → 统计 → 判断 → 写入 → 续期」，被拒请求不写成员 |
 | 设备在线 | 多端共用一个 key，任一设备心跳都会刷新整 key TTL，已断开设备被无限期保留，`IsOnline` 恒为 true | zset 的 score 存**设备自身**过期时刻，写入时顺带清理过期成员 |
+| 未读计数自增 | `HINCRBY` 成功而 `PEXPIRE` 丢失，该用户的未读 hash 变永久键：一个用户一条、field 数等于他的会话数，随用户数单调增长 | 一条脚本内批量 `HINCRBY` 所有接收者，并逐个 `PEXPIRE`，计数与 TTL 同生 |
 | 朋友圈时间线 | `EXPIRE` 丢失会让 zset 无 TTL 长期驻留 | `ZADD` + 裁剪 + `PEXPIRE` 一次执行 |
 
-不需要 Lua 的：`SETNX`（消息幂等）、`INCR`（会话序号）、`HINCRBY`（未读计数）
-本身就是原子命令，加脚本只会多一次网络往返。
+不需要 Lua 的：`SETNX`（消息幂等）本身就是原子命令，包一层脚本只剩开销。
+`HSETNX`（入群对齐已读）用 pipeline 即可 —— 续期失败最多让键早一期过期，
+缺失的已读位置下次 `MarkRead` 就会补回来，属于可自愈状态。
 
 ### 必须用事务（MySQL 侧）
 

@@ -274,7 +274,9 @@
 
 索引：`PRIMARY(id)`、`uk_user_conv(user_id, conv_id) UNIQUE`（与 `conversations` 同名但在不同表，不冲突）。
 
-Redis 的 `im:read:{uid}` hash 是热数据，DB 是回源与冷启动的兜底。
+Redis 的 `im:read:{uid}` hash 是热数据（30 天滑动 TTL，每次上报已读续期），DB 是回源与冷启动的兜底。
+hash 过期或 Redis 重启后，`Conversations` 先按 `ListReadSeqs` 回源，仍缺失的会话按群最新 seq 对齐，
+不会把入群前的历史消息一次性算成未读。
 
 ### 3.10 moments
 
@@ -371,7 +373,10 @@ Redis 的 `im:read:{uid}` hash 是热数据，DB 是回源与冷启动的兜底�
 
 ### 5.2 seq 的分配与恢复
 
-- 分配：`cache.NextSeq`，Lua 脚本内 `EXISTS` + `INCR`，键为 `im:seq:{convID}`。
+- 分配：`cache.NextSeq`，Lua 脚本内 `EXISTS` + `INCR` + `PEXPIRE`，键为 `im:seq:{convID}`。
+- 键带 **7 天滑动 TTL**，每次分配续期：冷会话回收内存，过期后按下面的回源流程重建。
+  所以「键不存在」是常态分支而非异常 —— 新会话、Redis 淘汰、TTL 到期三种情况走同一条路径，
+  `(conv_id, seq)` 唯一索引的 1062 回退正是为「回源窗口内被并发抢占」准备的。
 - 键不存在时脚本返回 **0**，service 回源 `MessageRepo.MaxSeq` 查库中最大 seq，
   再调 `cache.InitSeq` 原子地把键抬到 `max(seq)` 之后继续分配。
 - 为什么拆两步：若先 `INCR` 再修正，那条消息已经占用了 1 号，并发下别的请求会拿到 2，

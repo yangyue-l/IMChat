@@ -60,6 +60,18 @@
 
 ### GET /users/:user_id
 
+### GET /users/:user_id/online
+
+返回 `{ "user_id": 1001, "online": true }`。
+
+可见性：只能查自己或好友（先判拉黑、再判好友，与朋友圈一致），否则 403 且提示「只能查看好友的在线状态」。
+非好友与不存在用户返回同一个 403，不泄露账号是否存在。
+
+判定依据随部署模式变化（`cluster.enabled`）：单机直接读内存连接表，**精确**且零 Redis 往返；
+集群模式下本节点未命中时回源 `im:online:{uid}`，受心跳续期节奏影响（续期 60s，TTL 150s），
+即设备异常掉线后最长约 150s 才判离线。回源失败返回 500 而不是「离线」——
+「查不到」和「不在线」必须能区分开。
+
 ---
 
 ## 二、好友
@@ -86,7 +98,11 @@
 
 ### GET /friends
 
-返回 `[{ ...user, remark, starred, created_at }]`。
+返回 `[{ ...user, remark, starred, online, created_at }]`。
+
+`online` 是批量算出来的：一次调用只多一次 Redis 往返（单机则纯内存），不会逐人查。
+它是列表里的装饰字段，**查询失败时统一按 `false` 返回**而不是让整个列表报错 ——
+要精确判断某人是否在线请用 `/users/:user_id/online`，那里失败会明确报错。
 
 ### PATCH /friends/:friend_id
 
