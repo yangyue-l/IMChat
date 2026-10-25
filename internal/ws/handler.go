@@ -101,7 +101,7 @@ func (h *Handler) Serve(c *gin.Context) {
 
 	// 在线状态由 Hub 统一登记，与心跳续期、连接下线共用同一条路径
 	onlineCtx, onlineCancel := h.hub.bgContext()
-	h.hub.MarkOnline(onlineCtx, claims.UserID, device, h.hub.serverCfg.WSPongWait.Get())
+	h.hub.MarkOnline(onlineCtx, claims.UserID, device, h.hub.onlineTTL())
 	onlineCancel()
 
 	h.log.Info("连接建立", "uid", claims.UserID, "device", device, "online", h.hub.OnlineCount())

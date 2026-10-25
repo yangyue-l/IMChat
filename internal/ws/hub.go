@@ -119,6 +119,7 @@ func (s *shard) count() int {
 type OnlineStore interface {
 	SetOnline(ctx context.Context, uid int64, device string, ttl time.Duration) error
 	SetOffline(ctx context.Context, uid int64, device string) error
+	OnlineSet(ctx context.Context, uids []int64) (map[int64]bool, error)
 }
 
 // busMessage 是跨节点广播的消息体。
@@ -273,6 +274,42 @@ func (h *Hub) LocalOnline(uid int64) bool {
 	return h.shardOf(uid).has(uid)
 }
 
+// Online 返回这批用户里在线的那些（map 中存在即为在线），
+// 是业务层查询在线状态的唯一入口（实现 service.Presence）。
+//
+// 先扫本地分片：单机部署到这里就结束，零 Redis 往返，也没有 TTL 窗口造成的假离线
+// —— 分片 map 的生命周期与连接完全一致，比 Redis 那份还准。
+// 只有「本地未命中 + 开了集群」才把剩余的人一次性回源 Redis：多节点部署下
+// 「不在本节点」不代表离线，而逐个回源会把好友列表拖成 N 次往返。
+//
+// 回源失败必须把 error 抛出去，不能吞成「全部离线」：那样 Redis 一抖动，
+// 全站用户同时显示离线，日志里却什么都没有。
+func (h *Hub) Online(uids []int64) (map[int64]bool, error) {
+	out := make(map[int64]bool, len(uids))
+	remote := make([]int64, 0, len(uids))
+	for _, uid := range uids {
+		if h.LocalOnline(uid) {
+			out[uid] = true
+			continue
+		}
+		remote = append(remote, uid)
+	}
+	if len(remote) == 0 || !h.clusterEnabled || h.online == nil {
+		return out, nil
+	}
+
+	ctx, cancel := h.bgContext()
+	defer cancel()
+	online, err := h.online.OnlineSet(ctx, remote)
+	if err != nil {
+		return nil, err
+	}
+	for uid := range online {
+		out[uid] = true
+	}
+	return out, nil
+}
+
 // CanAccept 判断是否接纳新连接，maxConns 为单用户最大在线设备数（<=0 不限制）。
 //
 // 只在本节点内计数：多实例部署下每个节点各自允许 maxConns 个连接，
@@ -377,11 +414,33 @@ func (h *Hub) register(c *Client) *Client {
 	return old
 }
 
-// unregister 注销连接。
-func (h *Hub) unregister(c *Client) {
-	if h.shardOf(c.uid).remove(c) {
-		h.connCount.Add(-1)
+// unregister 注销连接，返回是否真的移除了自己。
+//
+// 同设备被顶号时旧连接的 remove 返回 false —— 分片里登记的已经换成新连接了。
+// 调用方必须据此跳过下线清理，否则会把新连接刚写好的在线态一起删掉，
+// 直到下一次续期（最长一个续期间隔）才恢复，中间这段全是假离线。
+func (h *Hub) unregister(c *Client) bool {
+	if !h.shardOf(c.uid).remove(c) {
+		return false
 	}
+	h.connCount.Add(-1)
+	return true
+}
+
+// onlineRenewEvery 是「每 N 次心跳续期一次在线状态」的 N。
+//
+// 心跳只负责保活连接，在线态不需要同频率刷新：续期越频繁，Redis 写入越多，
+// 而在线判定本身容忍几十秒的延迟。
+const onlineRenewEvery = 2
+
+// onlineTTL 返回在线态的有效期，与 WSPongWait（连接读超时）解耦。
+//
+// 续期间隔 = 心跳间隔 × onlineRenewEvery（30s × 2 = 60s），TTL 必须覆盖
+// 「一次续期失败」的最坏情况：2 个续期间隔 + 1 个心跳间隔 = 150s。
+// 过去直接用 WSPongWait(75s)，一次 Redis 超时就漏续，成员在 75s 过期而
+// 下一次续期在 120s，中间 45s 全在误报离线。
+func (h *Hub) onlineTTL() time.Duration {
+	return h.serverCfg.WSPingInterval.Get() * time.Duration(2*onlineRenewEvery+1)
 }
 
 // closeAll 优雅关闭：通知所有连接下线。

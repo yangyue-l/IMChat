@@ -57,8 +57,11 @@ func (c *Client) run() {
 	c.readLoop()
 
 	c.Close()
-	c.hub.unregister(c)
-	c.markOffline()
+	// 只有「自己仍是分片里登记的那个连接」才清在线态：
+	// 顶号场景下旧连接的收尾不能去删新连接刚写的记录。
+	if c.hub.unregister(c) {
+		c.markOffline()
+	}
 }
 
 // readLoop 读取上行帧。读超时由 Pong 续期，长时间无 pong 视为死连接。
@@ -116,7 +119,7 @@ func (c *Client) writeLoop() {
 			// 集群模式下才维护 Redis 在线状态，单机靠本地分片判断，零额外开销
 			if c.hub.clusterEnabled {
 				c.onlineTick++
-				if c.onlineTick%2 == 0 {
+				if c.onlineTick%onlineRenewEvery == 0 {
 					c.renewOnline()
 				}
 			}
@@ -159,9 +162,9 @@ func (c *Client) markOffline() {
 }
 
 // renewOnline 续期在线状态。多端共用同一个 Key，但过期时刻按设备独立计算，
-// 因此这里只需刷新自己那一份记录。
+// 因此这里只需刷新自己那一份记录。TTL 由 Hub 统一给出，必须大于续期间隔。
 func (c *Client) renewOnline() {
 	ctx, cancel := c.hub.bgContext()
 	defer cancel()
-	c.hub.MarkOnline(ctx, c.uid, c.device, c.hub.serverCfg.WSPongWait.Get())
+	c.hub.MarkOnline(ctx, c.uid, c.device, c.hub.onlineTTL())
 }
