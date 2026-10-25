@@ -92,6 +92,7 @@ func NewRouter(cfg *config.Config, svc *service.Services, jwtMgr *jwt.Manager,
 			read.GET("/users/me", r.me)
 			read.GET("/users/search", r.searchUsers)
 			read.GET("/users/:user_id", r.getUser)
+			read.GET("/users/:user_id/online", r.userOnline)
 
 			read.GET("/friends", r.listFriends)
 			read.GET("/friend-requests", r.listFriendRequests)

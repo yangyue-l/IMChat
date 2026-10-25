@@ -98,3 +98,18 @@ func (r *Router) getUser(c *gin.Context) {
 	}
 	resp.OK(c, u)
 }
+
+// userOnline 查询某用户是否在线。只能查自己或好友，判定逻辑与集群差异都在 service。
+func (r *Router) userOnline(c *gin.Context) {
+	id, err := pathID(c, "user_id")
+	if err != nil {
+		resp.Fail(c, err)
+		return
+	}
+	online, err := r.svc.User.Online(c.Request.Context(), middleware.UID(c), id)
+	if err != nil {
+		resp.Fail(c, err)
+		return
+	}
+	resp.OK(c, gin.H{"user_id": id, "online": online})
+}
