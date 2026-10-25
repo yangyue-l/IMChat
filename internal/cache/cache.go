@@ -3,7 +3,8 @@
 // 文件按业务域划分，一个文件只放一类 Key 的操作：
 //
 //	cache.go     门面结构、Key 规划总表、通用读穿逻辑 Remember
-//	user.go      用户资料、好友列表、黑名单、登录失败计数
+//	user.go      用户资料、登录失败计数
+//	relation.go  好友关系、拉黑关系判定结果
 //	group.go     群成员列表
 //	message.go   会话序号、消息幂等、未读计数、已读序号
 //	presence.go  设备在线状态
@@ -29,19 +30,19 @@ import (
 // Key 前缀集中定义，避免各处硬编码字符串。
 // 这张表是 Redis 命名空间的唯一索引，新增 Key 必须先在这里登记。
 const (
-	keyUser        = "im:user:"       // string 用户资料
-	keyFriendIDs   = "im:friend:"     // string 好友 ID 列表
-	keyBlockedIDs  = "im:blocked:"    // string 黑名单 ID 列表
-	keyGroupMember = "im:gmember:"    // string 群成员 ID 列表
-	keySeq         = "im:seq:"        // string 会话序号
-	keyDedup       = "im:dedup:"      // string 客户端消息幂等
-	keyUnread      = "im:unread:"     // hash   conv_id -> 未读数
-	keyRead        = "im:read:"       // hash   conv_id -> 已读 seq
-	keyOnline      = "im:online:"     // zset   设备 ID -> 设备自身过期时刻
-	keyFeed        = "im:feed:"       // zset   moment_id -> 发布时间戳
-	keyTokenDeny   = "im:token:deny:" // string 登出令牌黑名单
-	keyRate        = "im:rate:"       // zset   滑动窗口的放行记录
-	keyLoginFail   = "im:loginfail:"  // string 登录失败计数
+	keyUser           = "im:user:"        // string 用户资料
+	keyRelFriend      = "im:rel:friend:"  // string 好友关系判定结果
+	keyRelBlocked     = "im:rel:blocked:" // string 拉黑关系判定结果
+	keyGroupMemberIDs = "im:gmemberids:"  // string 群成员 ID 列表
+	keySeq            = "im:seq:"         // string 会话序号
+	keyDedup          = "im:dedup:"       // string 客户端消息幂等
+	keyUnread         = "im:unread:"      // hash   conv_id -> 未读数
+	keyRead           = "im:read:"        // hash   conv_id -> 已读 seq
+	keyOnline         = "im:online:"      // zset   设备 ID -> 设备自身过期时刻
+	keyFeed           = "im:feed:"        // zset   moment_id -> 发布时间戳
+	keyTokenDeny      = "im:token:deny:"  // string 登出令牌摘要
+	keyRate           = "im:rate:"        // zset   滑动窗口的放行记录
+	keyLoginFail      = "im:loginfail:"   // string 登录失败计数
 )
 
 // ErrNotFound 表示缓存与数据源均无该数据。

@@ -32,13 +32,13 @@ func TestPresenceKeyType(t *testing.T) {
 	if err := c.SetOffline(ctx, uid, "web"); err != nil {
 		t.Fatalf("SetOffline 异常: %v", err)
 	}
-	if online, err := c.IsOnline(ctx, uid); err != nil || online {
+	if online, err := c.OnlineSet(ctx, []int64{uid}); err != nil || online[uid] {
 		t.Fatalf("下线后期望不在线，实际 online=%v err=%v", online, err)
 	}
 }
 
 // TestPresenceExpirePerDevice 验证过期按设备独立计算：
-// 一台设备心跳不能给已过期的设备续命，否则 IsOnline 会一直为真。
+// 一台设备心跳不能给已过期的设备续命，否则在线判定会一直为真。
 func TestPresenceExpirePerDevice(t *testing.T) {
 	c := newTestCache(t)
 	ctx := context.Background()
@@ -61,7 +61,47 @@ func TestPresenceExpirePerDevice(t *testing.T) {
 	if len(members) != 1 || members[0] != "live" {
 		t.Fatalf("期望只保留 live，实际 %v", members)
 	}
-	if online, err := c.IsOnline(ctx, uid); err != nil || !online {
+	if online, err := c.OnlineSet(ctx, []int64{uid}); err != nil || !online[uid] {
 		t.Fatalf("期望在线，实际 online=%v err=%v", online, err)
+	}
+}
+
+// TestPresenceOnlineSet 验证批量在线判定：只把真正在线的 uid 放进结果，
+// 且与单查一致地按 score 过滤过期设备（好友列表与离线补偿共用这条路径）。
+func TestPresenceOnlineSet(t *testing.T) {
+	c := newTestCache(t)
+	ctx := context.Background()
+	base := time.Now().UnixNano()
+	uids := []int64{base, base + 1, base + 2}
+	t.Cleanup(func() {
+		for _, uid := range uids {
+			_ = c.rdb.Del(ctx, keyOnline+strconv.FormatInt(uid, 10))
+		}
+	})
+
+	if got, err := c.OnlineSet(ctx, nil); err != nil || len(got) != 0 {
+		t.Fatalf("空列表期望空结果，实际 %v err=%v", got, err)
+	}
+	if got, err := c.OnlineSet(ctx, uids); err != nil || len(got) != 0 {
+		t.Fatalf("全部离线期望空结果，实际 %v err=%v", got, err)
+	}
+
+	if err := c.SetOnline(ctx, uids[2], "web", time.Minute); err != nil {
+		t.Fatalf("SetOnline 异常: %v", err)
+	}
+	got, err := c.OnlineSet(ctx, uids)
+	if err != nil {
+		t.Fatalf("OnlineSet 异常: %v", err)
+	}
+	if len(got) != 1 || !got[uids[2]] {
+		t.Fatalf("期望只返回 uids[2]，实际 %v", got)
+	}
+
+	// 负 TTL 写入即过期，脚本会顺手清掉成员，此时不应再算在线
+	if err := c.SetOnline(ctx, uids[2], "web", -time.Second); err != nil {
+		t.Fatalf("SetOnline(过期) 异常: %v", err)
+	}
+	if got, err := c.OnlineSet(ctx, uids); err != nil || len(got) != 0 {
+		t.Fatalf("过期后期望空结果，实际 %v err=%v", got, err)
 	}
 }
