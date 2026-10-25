@@ -22,8 +22,26 @@ const (
 	DLQName      = "im.events.dlq"
 )
 
+// 建连与重连参数，生产者与消费者共用。
+const (
+	// dialTimeout 限制建连耗时。amqp.Dial 本身没有超时，broker 半死不活时
+	// 一次 Dial 能挂几十秒，既拖住启动也会拖住优雅停机。
+	dialTimeout = 5 * time.Second
+	// initialBackoff / maxBackoff 是重连退避区间。
+	initialBackoff = time.Second
+	maxBackoff     = 30 * time.Second
+)
+
+// dialAMQP 带超时地建立 AMQP 连接。
+func dialAMQP(url string) (*amqp.Connection, error) {
+	return amqp.DialConfig(url, amqp.Config{Dial: amqp.DefaultDial(dialTimeout)})
+}
+
 // Producer 是 RabbitMQ 生产者。channel 非并发安全，因此维护一个 channel 池，
 // 每个 Publish 独占一个 channel，避免加锁串行化。
+//
+// 连接断开后由 supervise 后台重连：缺少这段自愈逻辑时，broker 抖动一次就会让
+// 之后所有 Publish 永久失败，而调用方大多只 Warn 甚至忽略错误，事件等于静默丢失。
 type Producer struct {
 	cfg config.RabbitMQConfig
 	log *slog.Logger
@@ -31,23 +49,36 @@ type Producer struct {
 	mu   sync.RWMutex
 	conn *amqp.Connection
 	pool chan *amqp.Channel
+
+	closing chan struct{}
+	once    sync.Once
+	wg      sync.WaitGroup
 }
 
 // NewProducer 建立连接、声明拓扑并预热 channel 池。
 func NewProducer(cfg config.RabbitMQConfig, log *slog.Logger) (*Producer, error) {
-	p := &Producer{
-		cfg:  cfg,
-		log:  log,
-		pool: make(chan *amqp.Channel, cfg.ChannelPool),
+	size := cfg.ChannelPool
+	if size <= 0 {
+		// 零容量池会让每次 Publish 都新建 channel 再关掉，confirm 协商成本全白付
+		size = 1
 	}
-	if err := p.connect(); err != nil {
+	p := &Producer{
+		cfg:     cfg,
+		log:     log,
+		pool:    make(chan *amqp.Channel, size),
+		closing: make(chan struct{}),
+	}
+	if err := p.dial(); err != nil {
 		return nil, err
 	}
+	p.wg.Add(1)
+	go p.supervise()
 	return p, nil
 }
 
-func (p *Producer) connect() error {
-	conn, err := amqp.Dial(p.cfg.URL)
+// dial 建立一条连接并完成拓扑声明与池预热。首次失败由调用方直接返回错误。
+func (p *Producer) dial() error {
+	conn, err := dialAMQP(p.cfg.URL)
 	if err != nil {
 		return fmt.Errorf("连接 RabbitMQ 失败: %w", err)
 	}
@@ -57,11 +88,13 @@ func (p *Producer) connect() error {
 		return fmt.Errorf("创建 RabbitMQ channel 失败: %w", err)
 	}
 	if err := declareTopology(ch); err != nil {
+		_ = ch.Close()
 		_ = conn.Close()
 		return err
 	}
 	if p.cfg.PublisherConfirm {
 		if err := ch.Confirm(false); err != nil {
+			_ = ch.Close()
 			_ = conn.Close()
 			return fmt.Errorf("开启 publisher confirm 失败: %w", err)
 		}
@@ -72,26 +105,97 @@ func (p *Producer) connect() error {
 	p.conn = conn
 	p.mu.Unlock()
 
-	// 预热
-	for i := 0; i < p.cfg.ChannelPool; i++ {
+	p.warm(conn)
+	p.log.Info("RabbitMQ 生产者就绪", "exchange", ExchangeName, "channels", len(p.pool))
+	return nil
+}
+
+// warm 按池容量预热 channel；中途失败就停手，剩余请求走 acquire 的临时新建路径。
+func (p *Producer) warm(conn *amqp.Connection) {
+	for i := 0; i < cap(p.pool); i++ {
 		c, err := conn.Channel()
 		if err != nil {
-			break
+			return
 		}
 		if p.cfg.PublisherConfirm {
 			if err := c.Confirm(false); err != nil {
 				_ = c.Close()
-				break
+				return
 			}
 		}
 		select {
 		case p.pool <- c:
 		default:
 			_ = c.Close()
+			return
 		}
 	}
-	p.log.Info("RabbitMQ 生产者就绪", "exchange", ExchangeName, "channels", len(p.pool))
-	return nil
+}
+
+// supervise 监听连接断开并重连，直到 Close 被调用。
+func (p *Producer) supervise() {
+	defer p.wg.Done()
+	for {
+		p.mu.RLock()
+		conn := p.conn
+		p.mu.RUnlock()
+		if conn == nil {
+			return
+		}
+		// 连接已断开时 NotifyClose 会立即送达，不会漏事件
+		lost := conn.NotifyClose(make(chan *amqp.Error, 1))
+		select {
+		case <-p.closing:
+			return
+		case err := <-lost:
+			p.log.Warn("RabbitMQ 连接断开，开始重连", "err", err)
+		}
+		p.drop()
+		if !p.reconnect() {
+			return
+		}
+	}
+}
+
+// reconnect 退避重连直到成功或收到退出信号，返回是否重连成功。
+func (p *Producer) reconnect() bool {
+	backoff := initialBackoff
+	for {
+		select {
+		case <-p.closing:
+			return false
+		case <-time.After(backoff):
+		}
+		if err := p.dial(); err != nil {
+			p.log.Warn("RabbitMQ 重连失败，稍后重试", "err", err, "backoff", backoff)
+			backoff = min(backoff*2, maxBackoff)
+			continue
+		}
+		p.log.Info("RabbitMQ 生产者已重连", "exchange", ExchangeName)
+		return true
+	}
+}
+
+// drop 丢弃当前连接与池内 channel。旧连接上的 channel 一律不可复用。
+func (p *Producer) drop() {
+	p.mu.Lock()
+	conn := p.conn
+	p.conn = nil
+	p.mu.Unlock()
+
+	for {
+		select {
+		case ch := <-p.pool:
+			if ch != nil {
+				_ = ch.Close()
+			}
+		default:
+			if conn != nil {
+				_ = conn.Close()
+			}
+			return
+		}
+	}
 }
 
 // Publish 投递事件到交换机，routing key 使用事件类型。
@@ -101,7 +205,7 @@ func (p *Producer) Publish(ctx context.Context, evt service.Event) error {
 		return fmt.Errorf("序列化事件失败: %w", err)
 	}
 
-	ch, err := p.acquire(ctx)
+	ch, err := p.acquire()
 	if err != nil {
 		return err
 	}
@@ -140,7 +244,7 @@ func (p *Producer) Publish(ctx context.Context, evt service.Event) error {
 }
 
 // acquire 取一个可用 channel；池空时临时新建，保证高并发下不被池大小卡死。
-func (p *Producer) acquire(ctx context.Context) (*amqp.Channel, error) {
+func (p *Producer) acquire() (*amqp.Channel, error) {
 	select {
 	case ch := <-p.pool:
 		if ch != nil && !ch.IsClosed() {
@@ -157,6 +261,7 @@ func (p *Producer) newChannel() (*amqp.Channel, error) {
 	conn := p.conn
 	p.mu.RUnlock()
 	if conn == nil || conn.IsClosed() {
+		// 重连中：快速失败，不阻塞业务主流程；supervise 会在后台恢复
 		return nil, fmt.Errorf("RabbitMQ 连接不可用")
 	}
 	ch, err := conn.Channel()
@@ -185,26 +290,11 @@ func (p *Producer) release(ch *amqp.Channel, healthy bool) {
 	}
 }
 
-// Close 关闭连接与全部 channel。
+// Close 停止重连并关闭连接与全部 channel。
 func (p *Producer) Close() {
-	p.mu.Lock()
-	conn := p.conn
-	p.conn = nil
-	p.mu.Unlock()
-
-	for {
-		select {
-		case ch := <-p.pool:
-			if ch != nil {
-				_ = ch.Close()
-			}
-		default:
-			if conn != nil {
-				_ = conn.Close()
-			}
-			return
-		}
-	}
+	p.once.Do(func() { close(p.closing) })
+	p.wg.Wait()
+	p.drop()
 }
 
 // declareTopology 声明交换机、队列、死信与绑定关系。幂等，可重复调用。

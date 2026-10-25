@@ -12,6 +12,10 @@ import (
 // Duration 让 yaml 支持 "30s" / "1h" 这类时长写法。
 type Duration time.Duration
 
+// maxConsumerWorkers 是消费并发度上限：每个 worker 一个独立 channel，
+// 超过这个量级基本是配置写错了，而不是真的需要这么多消费者。
+const maxConsumerWorkers = 32
+
 // UnmarshalYAML 实现 yaml 自定义解析。
 func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	var s string
@@ -72,6 +76,9 @@ type RabbitMQConfig struct {
 	Prefetch         int    `yaml:"prefetch"`
 	PublisherConfirm bool   `yaml:"publisher_confirm"`
 	ChannelPool      int    `yaml:"channel_pool"`
+	// ConsumerWorkers 是消费并发度，每个 worker 独占一个 channel。
+	// 未确认消息总量 = Prefetch × ConsumerWorkers，调大前者时要同步考虑内存与重复投递面。
+	ConsumerWorkers int `yaml:"consumer_workers"`
 }
 
 type ClusterConfig struct {
@@ -231,6 +238,9 @@ func (c *Config) applyDefaults() {
 	if c.RabbitMQ.ChannelPool == 0 {
 		c.RabbitMQ.ChannelPool = 8
 	}
+	if c.RabbitMQ.ConsumerWorkers == 0 {
+		c.RabbitMQ.ConsumerWorkers = 3
+	}
 
 	if c.Cluster.Shards == 0 {
 		c.Cluster.Shards = 64
@@ -348,6 +358,11 @@ func (c *Config) validate() error {
 	}
 	if c.Cluster.Shards <= 0 || c.Cluster.Shards&(c.Cluster.Shards-1) != 0 {
 		return fmt.Errorf("cluster.shards 必须是 2 的幂，当前 %d", c.Cluster.Shards)
+	}
+	// 每个 worker 独占一个 channel，配成几百个会直接打爆 broker 的连接与内存
+	if c.RabbitMQ.ConsumerWorkers < 0 || c.RabbitMQ.ConsumerWorkers > maxConsumerWorkers {
+		return fmt.Errorf("rabbitmq.consumer_workers 取值 1~%d，当前 %d",
+			maxConsumerWorkers, c.RabbitMQ.ConsumerWorkers)
 	}
 	// 滑动窗口少了窗口长度就等于没有配额，配置漏填要在启动期就报出来，
 	// 不能等线上跑起来才发现某个接口全程 429。

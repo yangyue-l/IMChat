@@ -36,6 +36,7 @@ rabbitmq:
   prefetch: 100
   publisher_confirm: true
   channel_pool: 8        # 生产者复用 channel 数
+  consumer_workers: 3    # 消费并发度，每 worker 一个独立 channel（未确认总量 = prefetch × workers）
 
 cluster:
   enabled: true          # 集群开关：true 时通过 Redis 总线跨节点投递，单机也可开着（多一次 Redis 往返）
