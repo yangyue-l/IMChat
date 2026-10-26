@@ -102,6 +102,7 @@ func NewRouter(cfg *config.Config, svc *service.Services, jwtMgr *jwt.Manager,
 			read.GET("/groups/:group_id", r.groupDetail)
 
 			read.GET("/conversations", r.listConversations)
+			read.GET("/conversations/unread", r.unreadSummary)
 			read.GET("/messages", r.history)
 
 			read.GET("/moments/timeline", r.momentTimeline)

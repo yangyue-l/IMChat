@@ -18,6 +18,11 @@ func (r *Router) listConversations(c *gin.Context) {
 	resp.OK(c, list)
 }
 
+// unreadSummary 未读汇总。客户端渲染角标只需这一个接口，不必拉全量会话列表。
+func (r *Router) unreadSummary(c *gin.Context) {
+	resp.OK(c, r.svc.Message.UnreadSummary(c.Request.Context(), middleware.UID(c)))
+}
+
 // updateConversation 设置置顶或免打扰。
 func (r *Router) updateConversation(c *gin.Context) {
 	convID := c.Param("conv_id")

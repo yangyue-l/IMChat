@@ -206,6 +206,27 @@
 }]
 ```
 
+### GET /conversations/unread
+
+```json
+{
+  "total": 24,
+  "items": [
+    { "conv_id": "p_2113_2114", "unread": 17 },
+    { "conv_id": "p_2113_2115", "unread": 5 },
+    { "conv_id": "p_2113_2116", "unread": 2 }
+  ]
+}
+```
+
+未读汇总，`total` 已由服务端累加，客户端直接用于角标。`items` 按未读降序，
+同未读按 `conv_id` 升序（顺序稳定，可直接渲染）。空结果返回 `items: []` 而不是 `null`。
+
+统计口径：只含**私聊**会话。群未读在写扩散下不落 Redis，它等于「群最新 seq − 我的已读 seq」，
+只能随会话列表实时计算，取 `GET /conversations` 各项的 `unread` 字段。
+Redis 不可用时该接口返回 `total: 0` + 空列表并记 Warn，不返回错误 —— 角标丢失可以被下次自增自愈，
+整个首屏报错不行。
+
 ### PATCH /conversations/:conv_id
 
 ```json

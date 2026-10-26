@@ -504,6 +504,64 @@ func (s *MessageService) Conversations(ctx context.Context, uid int64) ([]Conver
 	return out, nil
 }
 
+// UnreadItem 单个会话的未读数。
+type UnreadItem struct {
+	ConvID string `json:"conv_id"`
+	Unread int64  `json:"unread"`
+}
+
+// UnreadSummaryDTO 未读汇总。total 由服务端算好，客户端直接拿去渲染角标，
+// 不必再遍历 items 自己累加。
+type UnreadSummaryDTO struct {
+	Total int64        `json:"total"`
+	Items []UnreadItem `json:"items"`
+}
+
+// UnreadSummary 返回某用户的未读汇总。
+//
+// 数据源只有 im:unread:{uid} 一个 hash：写扩散发消息时自增、上报已读时 HDEL，
+// 是唯一读时零计算的来源。群会话的未读不在这里 —— 读扩散下它等于群最新 seq
+// 减我的已读 seq，要拿群表才能算，那是会话列表的职责，这里不重复一条查询链。
+//
+// Redis 异常时降级成空汇总而不是报错：这个接口只用来渲染红点，缓存挂掉时
+// 显示「无未读」比整个首屏报错更可接受，计数本身也会随下一次自增/已读重建。
+// 降级必须留 Warn，否则「红点再也不出现」会被当成前端问题排查很久。
+func (s *MessageService) UnreadSummary(ctx context.Context, uid int64) *UnreadSummaryDTO {
+	counts, err := s.deps.Cache.UnreadCounts(ctx, uid)
+	if err != nil {
+		slog.Warn("未读汇总降级为空", "uid", uid, "err", err)
+		return &UnreadSummaryDTO{Items: []UnreadItem{}}
+	}
+	total, items := summarizeUnread(counts)
+	return &UnreadSummaryDTO{Total: total, Items: items}
+}
+
+// summarizeUnread 把原始计数整理成按未读降序的列表。
+//
+// 排序放在服务端：客户端要的是「先看哪个会话」，这个顺序只有拿到全量计数才能定。
+// 未读相同的按 conv_id 升序，保证同一份数据每次返回的顺序都一样 ——
+// map 遍历本身随机，少了这一级，同样的未读会让红点顺序来回跳。
+func summarizeUnread(counts map[string]int64) (int64, []UnreadItem) {
+	items := make([]UnreadItem, 0, len(counts))
+	var total int64
+	for convID, n := range counts {
+		// 已读清零走 HDEL，正常不会有 0 或负数；这里再兜一次，
+		// 免得旧的脏 field 撑大列表并让 total 对不上客户端看到的红点。
+		if n <= 0 {
+			continue
+		}
+		total += n
+		items = append(items, UnreadItem{ConvID: convID, Unread: n})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Unread != items[j].Unread {
+			return items[i].Unread > items[j].Unread
+		}
+		return items[i].ConvID < items[j].ConvID
+	})
+	return total, items
+}
+
 // alignReadSeqs 把从未上报已读的群会话对齐到当前位置，避免历史消息被算成未读。
 // 数量上限 100，超出的留到下次，保证单次请求不被写放大拖慢。
 func (s *MessageService) alignReadSeqs(ctx context.Context, uid int64, seqs map[string]int64) {
