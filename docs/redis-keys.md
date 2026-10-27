@@ -124,7 +124,9 @@
 
 | 项 | 内容 |
 |---|---|
-| 结构 | string，十进制整数，`INCR` 语义 |
+| Key | `im:seq:{convID}`，`convID` 形如 `g_<gid>`（群）或 `p_<小uid>_<大uid>`（私聊） |
+| 结构 | string，十进制整数，`INCR` 语义；**值 = 该会话已分配到的最大 seq**，下一条消息 = 值 + 1 |
+| 数据量 | 一个会话一个 key，value 通常只有 1~7 字节（例如 `"27"`），不存任何消息内容 |
 | TTL | 7 天滑动（每次分配续期），**比 unread/read 短** |
 | 写入 | `Cache.NextSeq`（探测）/ `Cache.InitSeq`（初始化并分配），均为 Lua |
 | 失效 | 只靠过期，没有主动删除 |
@@ -220,11 +222,11 @@ NextSeq(convID)
 | 结构 | **zset**，member = 设备标识（`web`/`android`/…），score = **该设备自己的过期时刻**（毫秒时间戳） |
 | TTL | key 级 150s = `ws_ping_interval`(30s) × (2 × 2 + 1)；成员级由 score 表达 |
 | 写入 | 握手 `Hub.MarkOnline`；心跳每 2 次 `Client.renewOnline` 一次；退出 `Hub.markOffline` → `ZREM` |
-| 判定 | `ZCOUNT key <now> +inf > 0`，**不看 key 级 TTL** |
+| 判定 | `cache.OnlineSet` 一次 pipeline 批量 `ZCOUNT key <now> +inf`，返回在线集合；**不看 key 级 TTL** |
 
 **使用场景**：判断接收者是否在线，决定要不要投离线消息；查询用户在线状态（仅限自己或好友）。
 
-**为什么 score 存过期时刻而不是用 set + key TTL**：多端共用一个 key，任一设备心跳都会刷新整个 key 的 TTL，已断开设备的成员就会被无限期保留，导致 `IsOnline` 恒为 true。把过期时刻放进 score，`ZREMRANGEBYSCORE` 每次写入顺手清理，单设备掉线不会被其他设备「续命」。
+**为什么 score 存过期时刻而不是用 set + key TTL**：多端共用一个 key，任一设备心跳都会刷新整个 key 的 TTL，已断开设备的成员就会被无限期保留，在线判定恒为 true。把过期时刻放进 score，`ZREMRANGEBYSCORE` 每次写入顺手清理，单设备掉线不会被其他设备「续命」。
 
 **集群读取策略**：先查本地分片 map，未命中且开启集群时才回源 Redis。单机部署就是本地这条路径，零 Redis 往返，也不存在 TTL 窗口造成的假离线。
 
@@ -381,6 +383,7 @@ NextSeq(convID)
 4. **`im:seq:` / `im:read:` / `im:unread:` 过期是常态而非异常**。三者都有明确的自愈路径（回源 `MAX(seq)`、回源 `conversation_reads`、按 `last_msg_id` 兜底），所以 TTL 可以设得比「永久」短得多，避免冷数据长期占内存。
 5. **`im:bus` 不持久化**。节点掉线期间的总线消息会丢，离线补偿由 RabbitMQ 离线队列负责，两者职责不同不能互相替代。
 6. **部分 TTL 仍是代码常量**：`im:dedup:`（10m）、`im:feed:`（7d）、`im:unread:`/`im:read:`（30d）、`im:seq:`（7d）。当前不需要按环境调整，若要支持灰度调参需迁到 `config.cache`。
+7. **老版本遗留的 `im:seq:` 键没有 TTL**。7 天 TTL 是后加的，加之前创建的键只有在「该会话再次分配序号」时才会被 `PEXPIRE`，不活跃的会话会一直以永久键形式驻留。这不会影响正确性（值本身是可重建的），但会占内存，需要按第 11 节命令手工补齐或直接删除。
 7. **多 Key 的 Lua 脚本在 Redis Cluster 下会 `CROSSSLOT`**。`incrUnreadScript` 一次要写多个用户的 `im:unread:`，不同 uid 天然不同槽。当前用的是单机客户端，没有这个问题；将来切 Cluster 客户端必须按 uid 分批执行或退回 pipeline（后者会失去「计数与续期同生」的保证）。
 8. **群成员列表为空的处理**：`im:gmemberids:` 回源拿到空列表时视为 `ErrNotFound` 并写空值占位。正常路径不可达（发消息前已校验发送者是群成员），仅在「最后一人退群的同时有人发消息」这种极端时序下会以 500 收场，属已知边界。
 
@@ -415,8 +418,16 @@ redis-cli ZCARD  im:online:10086
 redis-cli HGETALL im:unread:10086
 redis-cli HGETALL im:read:10086
 
-# 某会话的序号
-redis-cli GET im:seq:group:42
+# 某会话的序号（群聊 / 私聊两种 convID 形态）
+redis-cli GET im:seq:g_2113528527860011008
+redis-cli GET im:seq:p_2113507465927593984_2113507466275721216
+
+# 排查「seq 键被写成永久键」（老版本创建、之后该会话再无新消息）
+# 新版本的两条脚本都会 PEXPIRE，所以只要该会话再发一条消息就会自动补上；
+# 不活跃的会话等不到，需要手工补：
+redis-cli --scan --pattern 'im:seq:*' | while read -r k; do
+  [ "$(redis-cli PTTL "$k")" = "-1" ] && redis-cli PEXPIRE "$k" 604800000
+done
 
 # 观察在线设备与其过期时刻（score 是毫秒时间戳，小于 now 即已过期）
 redis-cli ZRANGE im:online:10086 0 -1 WITHSCORES
