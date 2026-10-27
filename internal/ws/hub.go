@@ -24,18 +24,21 @@ func newShard() *shard {
 	return &shard{conns: make(map[int64]map[string]*Client)}
 }
 
-// push 向该分片内某用户的所有连接投递，返回成功入队的连接数。
-func (s *shard) push(uid int64, payload []byte) int {
+// push 向该分片内这批 uid 的所有连接投递，返回成功入队的连接数。
+//
+// 收一批 uid 而不是单个，是为了让「按分片分组」真正省下锁：调用方已经保证
+// 这些 uid 属于本分片，一次 RLock 就能全部收集完。群消息动辄几百个接收者，
+// 逐个调用就是几百次加锁 —— 跟分片想解决的竞争问题正好相反。
+//
+// 连接指针先复制出来再放锁，trySend 不持锁执行：给一个慢客户端入队不该
+// 卡住同分片的其他用户。
+func (s *shard) push(uids []int64, payload []byte) int {
 	s.mu.RLock()
-	conns := s.conns[uid]
-	if len(conns) == 0 {
-		s.mu.RUnlock()
-		return 0
-	}
-	// 复制一份连接列表，避免持锁期间做耗时操作
-	clients := make([]*Client, 0, len(conns))
-	for _, c := range conns {
-		clients = append(clients, c)
+	clients := make([]*Client, 0, len(uids))
+	for _, uid := range uids {
+		for _, c := range s.conns[uid] {
+			clients = append(clients, c)
+		}
 	}
 	s.mu.RUnlock()
 
@@ -253,7 +256,8 @@ func (h *Hub) PushToUsers(uids []int64, payload []byte) int {
 	return n
 }
 
-// localPush 只推本节点连接。按分片分组，把加锁次数从 O(用户数) 降到 O(分片数)。
+// localPush 只推本节点连接。按分片分组，每片一次 RLock 处理完整批 ——
+// 加锁次数是 O(分片数) 而不是 O(用户数)，群消息几百个接收者时差别明显。
 func (h *Hub) localPush(uids []int64, payload []byte) int {
 	if len(uids) == 0 {
 		return 0
@@ -265,9 +269,7 @@ func (h *Hub) localPush(uids []int64, payload []byte) int {
 	}
 	total := 0
 	for s, ids := range buckets {
-		for _, uid := range ids {
-			total += s.push(uid, payload)
-		}
+		total += s.push(ids, payload)
 	}
 	return total
 }

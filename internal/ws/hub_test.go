@@ -1,6 +1,8 @@
 package ws
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
@@ -86,6 +88,81 @@ func TestOnlineWithoutCluster(t *testing.T) {
 	}
 }
 
+// stubOnlineStore 记录回源请求，用来验证「谁被问了 Redis」。
+type stubOnlineStore struct {
+	online map[int64]bool
+	err    error
+	asked  [][]int64
+}
+
+func (s *stubOnlineStore) SetOnline(context.Context, int64, string, time.Duration) error {
+	return nil
+}
+
+func (s *stubOnlineStore) SetOffline(context.Context, int64, string) error { return nil }
+
+func (s *stubOnlineStore) OnlineSet(_ context.Context, uids []int64) (map[int64]bool, error) {
+	s.asked = append(s.asked, uids)
+	if s.err != nil {
+		return nil, s.err
+	}
+	out := make(map[int64]bool, len(uids))
+	for _, uid := range uids {
+		if s.online[uid] {
+			out[uid] = true
+		}
+	}
+	return out, nil
+}
+
+// TestOnlineMergesLocalAndRemote 验证集群模式的合并语义：
+// 本地已连上的人不重复问 Redis，未命中的才批量回源，最终结果两边取并集。
+func TestOnlineMergesLocalAndRemote(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Cluster.Enabled = true
+	cfg.Cluster.Shards = 4
+	store := &stubOnlineStore{online: map[int64]bool{2: true}}
+	h := NewHub(cfg, nil, store, "test-node", slog.Default())
+
+	local := &Client{uid: 1, device: "web", hub: h}
+	h.register(local)
+
+	got, err := h.Online([]int64{1, 2, 3})
+	if err != nil {
+		t.Fatalf("Online 异常: %v", err)
+	}
+	if !got[1] {
+		t.Fatal("本地已连接的用户应判在线")
+	}
+	if !got[2] {
+		t.Fatal("远端在线的用户应判在线")
+	}
+	if got[3] {
+		t.Fatal("谁都没连的用户不应判在线")
+	}
+
+	// 1 已经在本地命中，回源请求里不该出现它
+	if len(store.asked) != 1 {
+		t.Fatalf("应恰好回源一次，实际 %d 次", len(store.asked))
+	}
+	if want := []int64{2, 3}; len(store.asked[0]) != 2 || store.asked[0][0] != want[0] || store.asked[0][1] != want[1] {
+		t.Fatalf("回源名单应只剩未本地命中的 [2 3]，实际 %v", store.asked[0])
+	}
+}
+
+// TestOnlinePropagatesStoreError 验证回源失败不会被吞成「全部离线」。
+func TestOnlinePropagatesStoreError(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Cluster.Enabled = true
+	cfg.Cluster.Shards = 4
+	boom := errors.New("redis down")
+	h := NewHub(cfg, nil, &stubOnlineStore{err: boom}, "test-node", slog.Default())
+
+	if _, err := h.Online([]int64{2}); !errors.Is(err, boom) {
+		t.Fatalf("应透出回源错误，实际 %v", err)
+	}
+}
+
 // TestOnlineTTLOutlivesMissedRenew 锁住「TTL 必须覆盖一次续期失败」的约束。
 //
 // 回归背景：TTL 曾直接取 WSPongWait(75s)，而续期间隔是 60s。只要一次续期因
@@ -98,5 +175,56 @@ func TestOnlineTTLOutlivesMissedRenew(t *testing.T) {
 	renew := ping * onlineRenewEvery
 	if ttl := h.onlineTTL(); ttl <= renew*2 {
 		t.Fatalf("TTL 必须覆盖连续两次续期间隔，ttl=%v renew=%v", ttl, renew)
+	}
+}
+
+// newTestClient 构造不带真实 websocket.Conn 的连接，只够跑推送路径。
+func newTestClient(h *Hub, uid int64, device string) *Client {
+	return &Client{
+		uid:    uid,
+		device: device,
+		hub:    h,
+		send:   make(chan []byte, 4),
+		closed: make(chan struct{}),
+		log:    h.log,
+	}
+}
+
+// TestPushToUsersCoversEveryConn 验证批量推送在一次加锁下覆盖全部接收者。
+//
+// 回归背景：shard.push 改成收一批 uid 之后，一旦分组或内层遍历写错
+// （只用第一个 uid、或漏掉同用户的第二个设备），消息会静默只送到一部分人 ——
+// 这种 bug 不报错、不 panic，只是有人收不到消息，只有测试能拦住。
+func TestPushToUsersCoversEveryConn(t *testing.T) {
+	h := newTestHub(t)
+
+	clients := []*Client{
+		newTestClient(h, 1, "web"),
+		newTestClient(h, 1, "ios"),
+		newTestClient(h, 2, "web"),
+		newTestClient(h, 3, "web"),
+	}
+	for _, c := range clients {
+		h.register(c)
+	}
+
+	payload := []byte(`{"type":"message"}`)
+	if n := h.PushToUsers([]int64{1, 2, 3}, payload); n != len(clients) {
+		t.Fatalf("应投递到全部 %d 条连接，实际 %d", len(clients), n)
+	}
+	for _, c := range clients {
+		select {
+		case got := <-c.send:
+			if string(got) != string(payload) {
+				t.Fatalf("uid=%d device=%s 载荷不对: %s", c.uid, c.device, got)
+			}
+		default:
+			t.Fatalf("uid=%d device=%s 没收到推送", c.uid, c.device)
+		}
+	}
+
+	// 混合离线 uid 时，投递数只算真实连接
+	if n := h.PushToUsers([]int64{1, 999}, payload); n != 2 {
+		t.Fatalf("离线用户不计入投递数，期望 2 实际 %d", n)
 	}
 }
