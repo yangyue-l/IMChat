@@ -60,6 +60,37 @@ type GroupDetail struct {
 	Members []GroupMemberItem `json:"members"`
 }
 
+// MemberPage 群成员分页结果。
+type MemberPage struct {
+	Total   int               `json:"total"`
+	Offset  int               `json:"offset"`
+	Limit   int               `json:"limit"`
+	Members []GroupMemberItem `json:"members"`
+}
+
+// 成员分页的缺省值与上限。上限设 200 是给「一次拉多点少翻页」留空间，
+// 再大就等于让客户端用一次请求把 1000 人的群整库拉走。
+const (
+	defaultMemberPageSize = 50
+	maxMemberPageSize     = 200
+)
+
+// normalizePage 归一化分页参数。
+// limit 传 0/负数一律当没传，按缺省值处理；offset 传负数归零，
+// 否则带进 SQL 的负 OFFSET 会被 MySQL 直接报语法错误。
+func normalizePage(offset, limit int) (int, int) {
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		limit = defaultMemberPageSize
+	}
+	if limit > maxMemberPageSize {
+		limit = maxMemberPageSize
+	}
+	return offset, limit
+}
+
 // Create 建群。事务内一次性写入群、成员与人数，避免中间态。
 func (s *GroupService) Create(ctx context.Context, ownerID int64, req CreateGroupReq) (*GroupItem, error) {
 	name := req.Name
@@ -177,6 +208,46 @@ func (s *GroupService) Detail(ctx context.Context, uid, gid int64) (*GroupDetail
 	if err != nil {
 		return nil, err
 	}
+	items, err := s.memberItems(ctx, members)
+	if err != nil {
+		return nil, err
+	}
+	return &GroupDetail{Group: *s.toItem(g, me.Role, me.Muted), Members: items}, nil
+}
+
+// Members 分页查看群成员，仅群内成员可见。
+//
+// 总数取群表冗余的 member_count，不再每页跑一次 count(*)：它与群详情、群列表里的
+// member_count 是同一个数，不会出现「头部写 1000 人、分页器说 998 人」的自相矛盾。
+// 代价是极端情况下（事务外强杀进程）该计数可能偏大，翻到末尾拿到空页，前端按空页收尾即可。
+func (s *GroupService) Members(ctx context.Context, uid, gid int64, offset, limit int) (*MemberPage, error) {
+	// 参数先行拦掉：uid 来自令牌、gid 来自路径，走到这里都该是正数，
+	// 真出现非正值说明调用链有问题，直接报参数错误，别拿它去查库。
+	if uid <= 0 || gid <= 0 {
+		return nil, resp.WithMsg(resp.ErrInvalidParam, "用户或群参数非法")
+	}
+	g, _, err := s.mustBeMember(ctx, uid, gid)
+	if err != nil {
+		return nil, err
+	}
+	offset, limit = normalizePage(offset, limit)
+	members, err := s.deps.Groups.ListMembersPage(ctx, gid, offset, limit)
+	if err != nil {
+		return nil, err
+	}
+	items, err := s.memberItems(ctx, members)
+	if err != nil {
+		return nil, err
+	}
+	return &MemberPage{Total: g.MemberCount, Offset: offset, Limit: limit, Members: items}, nil
+}
+
+// memberItems 补齐成员的用户资料后组装成返回项。
+func (s *GroupService) memberItems(ctx context.Context, members []model.GroupMember) ([]GroupMemberItem, error) {
+	items := make([]GroupMemberItem, 0, len(members))
+	if len(members) == 0 {
+		return items, nil
+	}
 	ids := make([]int64, 0, len(members))
 	for _, m := range members {
 		ids = append(ids, m.UserID)
@@ -185,18 +256,28 @@ func (s *GroupService) Detail(ctx context.Context, uid, gid int64) (*GroupDetail
 	if err != nil {
 		return nil, err
 	}
+	return buildMemberItems(members, users), nil
+}
+
+// buildMemberItems 把成员行与用户资料拼成返回项，保持入参顺序。
+//
+// 用户资料缺失（缓存/库被清过、成员行残留）时跳过这个人，而不是塞个只有 uid 的空壳：
+// 前端拿不到昵称会渲染成一行空白，反而看不出是谁。
+// 空成员也要返回非 nil 切片，否则 JSON 会序列化成 null，前端拿它遍历会直接报错。
+func buildMemberItems(members []model.GroupMember, users map[int64]model.PublicUser) []GroupMemberItem {
 	items := make([]GroupMemberItem, 0, len(members))
-	for _, m := range members {
-		u, ok := users[m.UserID]
+	for i := range members {
+		u, ok := users[members[i].UserID]
 		if !ok {
 			continue
 		}
+		m := &members[i]
 		items = append(items, GroupMemberItem{
 			PublicUser: u, Role: m.Role, GroupNickname: m.GroupNickname,
 			Muted: m.Muted, JoinedAt: m.JoinedAt,
 		})
 	}
-	return &GroupDetail{Group: *s.toItem(g, me.Role, me.Muted), Members: items}, nil
+	return items
 }
 
 // Update 修改群资料，仅管理员可操作。

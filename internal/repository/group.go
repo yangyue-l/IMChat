@@ -86,6 +86,23 @@ func (r *GroupRepo) ListMembers(ctx context.Context, gid int64) ([]model.GroupMe
 	return list, err
 }
 
+// ListMembersPage 分页查询群成员。
+//
+// 排序必须是全序，否则翻页会重复或漏人：role 降序让群主/管理员固定在最前，
+// joined_at 升序让老成员在前，最后用 id 兜底 —— 同一批入群的成员 joined_at
+// 完全相同（Create/AddMembers 里是同一个 time.Now），只有前两列时 MySQL 对这组
+// 行没有稳定顺序，LIMIT/OFFSET 每页都可能重新排出不同的次序。
+//
+// 不给 (group_id, role, joined_at) 建索引是有意的：成员上限 MaxGroupMembers=1000，
+// 单群排序最多扫 1000 行，filesort 的成本远低于多维护一棵索引带来的写放大。
+func (r *GroupRepo) ListMembersPage(ctx context.Context, gid int64, offset, limit int) ([]model.GroupMember, error) {
+	var list []model.GroupMember
+	err := r.db.WithContext(ctx).Where("group_id = ?", gid).
+		Order("role DESC, joined_at ASC, id ASC").
+		Offset(offset).Limit(limit).Find(&list).Error
+	return list, err
+}
+
 // MemberIDs 只取成员 ID，用于消息扇出。
 func (r *GroupRepo) MemberIDs(ctx context.Context, gid int64) ([]int64, error) {
 	var ids []int64

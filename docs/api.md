@@ -140,6 +140,32 @@
 
 详情返回 `{ group, members }`，成员含 `role`（0 成员 / 1 管理员 / 2 群主）、`muted`。
 
+`members` 是全量返回（群上限 1000 人），成员多的群请改用下面的分页接口。
+
+### GET /groups/:group_id/members
+
+群成员分页，仅群内成员可见（非成员返回 `40300`）。
+
+| 查询参数 | 说明 |
+|---|---|
+| `offset` | 跳过条数，缺省 0 |
+| `limit` | 每页条数，缺省 **50**，上限 **200**（超出按 200 处理，`0` 按缺省处理） |
+
+```json
+{
+  "total": 128,
+  "offset": 40,
+  "limit": 20,
+  "members": [
+    { "id": "2113...", "nickname": "张三", "role": 2, "group_nickname": "群主本人", "muted": false, "joined_at": "..." }
+  ]
+}
+```
+
+排序：`role` 降序（群主 → 管理员 → 成员）→ `joined_at` 升序 → `id` 升序。
+`total` 取群表冗余的 `member_count`，与群详情里的 `member_count` 一致。
+`offset`/`limit` 传非整数或负数返回 `40000`，不会静默回退成第一页。
+
 ### PATCH /groups/:group_id
 
 ```json
@@ -152,6 +178,7 @@
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
+| GET | /groups/:id/members | 成员分页（见上） |
 | POST | /groups/:id/members | `{ "user_ids": [...] }` 邀请成员 |
 | DELETE | /groups/:id/members/:uid | 踢人；`:uid` 为自己即退群 |
 | POST | /groups/:id/mute | `{ "user_id": "...", "muted": true }` 禁言 |

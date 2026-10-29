@@ -48,6 +48,26 @@ func (r *Router) groupDetail(c *gin.Context) {
 	resp.OK(c, d)
 }
 
+// listGroupMembers 分页查看群成员。
+func (r *Router) listGroupMembers(c *gin.Context) {
+	gid, err := pathID(c, "group_id")
+	if err != nil {
+		resp.Fail(c, err)
+		return
+	}
+	offset, limit, err := queryPaging(c)
+	if err != nil {
+		resp.Fail(c, err)
+		return
+	}
+	page, err := r.svc.Group.Members(c.Request.Context(), middleware.UID(c), gid, offset, limit)
+	if err != nil {
+		resp.Fail(c, err)
+		return
+	}
+	resp.OK(c, page)
+}
+
 // updateGroup 修改群资料。
 func (r *Router) updateGroup(c *gin.Context) {
 	gid, err := pathID(c, "group_id")

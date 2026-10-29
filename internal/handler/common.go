@@ -51,3 +51,26 @@ func queryInt(c *gin.Context, name string, fallback int) int {
 	}
 	return v
 }
+
+// queryPaging 解析分页参数 offset/limit，缺省返回 0 交由 service 归一。
+//
+// 这里刻意不学 queryInt 的「解析失败就用 fallback」：offset 静默归零会让无限滚动
+// 永远停在第一页、反复拉同一批数据，而客户端完全看不出自己传错了；
+// limit 静默归缺省值则会让客户端以为拿到了它要的条数。分页参数错了就报错。
+func queryPaging(c *gin.Context) (offset, limit int, err error) {
+	for _, f := range []struct {
+		name string
+		dst  *int
+	}{{"offset", &offset}, {"limit", &limit}} {
+		raw := c.Query(f.name)
+		if raw == "" {
+			continue
+		}
+		v, convErr := strconv.Atoi(raw)
+		if convErr != nil || v < 0 {
+			return 0, 0, resp.WithMsg(resp.ErrInvalidParam, "参数 "+f.name+" 非法")
+		}
+		*f.dst = v
+	}
+	return offset, limit, nil
+}
