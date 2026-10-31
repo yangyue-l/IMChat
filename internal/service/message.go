@@ -29,6 +29,8 @@ const (
 	maxExtraBytes    = 1024 // 与 messages.extra 的列宽一致，超长会撞 MySQL 1406
 	historyPageLimit = 50
 	recallWindow     = 2 * time.Minute
+	// 引用摘要在气泡里只占一行，超过这个长度必然是省略号，存全文纯属浪费列宽。
+	maxQuotePreviewRunes = 64
 )
 
 // SendReq 发送消息参数。私聊填 ToID，群聊填 GroupID，用 ConvType 区分。
@@ -39,7 +41,17 @@ type SendReq struct {
 	MsgType     int8   `json:"msg_type"`
 	Content     string `json:"content"`
 	Extra       string `json:"extra"`
+	QuoteMsgID  int64  `json:"quote_msg_id,string"` // 引用消息 ID，0 表示不引用
 	ClientMsgID string `json:"client_msg_id"`
+}
+
+// QuoteDTO 被引用消息的摘要，随消息体一起下发。
+// 只带渲染引用条所需的三个字段：客户端要展示原消息全文时应重新拉历史，
+// 而不是期望每条新消息都背着一份旧消息副本。
+type QuoteDTO struct {
+	MsgID   int64  `json:"msg_id,string"`
+	FromID  int64  `json:"from_id,string"`
+	Preview string `json:"preview"`
 }
 
 // MessageDTO 对外消息结构。
@@ -55,6 +67,7 @@ type MessageDTO struct {
 	MsgType     int8              `json:"msg_type"`
 	Content     string            `json:"content"`
 	Extra       string            `json:"extra,omitempty"`
+	Quote       *QuoteDTO         `json:"quote,omitempty"`
 	Status      int8              `json:"status"`
 	CreatedAt   time.Time         `json:"created_at"`
 	FromUser    *model.PublicUser `json:"from_user,omitempty"`
@@ -182,7 +195,13 @@ func (s *MessageService) persistAndDeliver(ctx context.Context, sc *sendContext)
 		}
 	}
 
-	// 2. 分配会话内序号，Redis 单线程执行脚本保证严格递增。
+	// 2. 引用校验。放在幂等判定之后：同一条消息重试时若被引用消息刚被撤回，
+	// 先判定重试命中就会直接返回已落库的消息，不会被新状态误判成发送失败。
+	if err := s.attachQuote(ctx, sc); err != nil {
+		return nil, err
+	}
+
+	// 3. 分配会话内序号，Redis 单线程执行脚本保证严格递增。
 	//
 	// 返回 0 说明序号键不存在，有三种来源：新会话的第一条消息、Redis 重启/淘汰
 	// 弄丢了键、以及 seqTTL 到期被回收。三者若不处理，seq 会从 1 与库里历史重叠，
@@ -216,7 +235,7 @@ func (s *MessageService) persistAndDeliver(ctx context.Context, sc *sendContext)
 		Extra:       sc.req.Extra,
 	}
 
-	// 3. 落库 + 刷新会话指针，必须同一事务。
+	// 4. 落库 + 刷新会话指针，必须同一事务。
 	//
 	// 拆开写的后果是真丢状态：
 	//   - 私聊：消息进库了但会话行没刷新，列表看不到这条消息，而未读数照样 +1，
@@ -261,7 +280,7 @@ func (s *MessageService) persistAndDeliver(ctx context.Context, sc *sendContext)
 		return nil, err
 	}
 
-	// 4. 未读计数在事务外：Redis 与 MySQL 无法同事务，只能保证「尽力而为 + 可重算」。
+	// 5. 未读计数在事务外：Redis 与 MySQL 无法同事务，只能保证「尽力而为 + 可重算」。
 	// 私聊未读失真的兜底是会话行里的 last_msg_id（点进去就能看到）；
 	// 群未读本身不落存储，由 last_msg_seq − read_seq 实时算出，天然可自愈。
 	if sc.convType == model.ConvPrivate {
@@ -270,7 +289,7 @@ func (s *MessageService) persistAndDeliver(ctx context.Context, sc *sendContext)
 		}
 	}
 
-	// 5. 在线推送。只序列化一次，广播时所有连接复用同一份字节
+	// 6. 在线推送。只序列化一次，广播时所有连接复用同一份字节
 	sender, err := s.deps.Users.GetByID(ctx, sc.from)
 	var fromPublic *model.PublicUser
 	if err == nil && sender != nil {
@@ -284,12 +303,123 @@ func (s *MessageService) persistAndDeliver(ctx context.Context, sc *sendContext)
 		delivered = s.deps.Pusher.PushToUsers(sc.receivers, payload)
 	}
 
-	// 6. 离线补偿：本地一条都没投出去，且集群里也没人在线时才投 MQ。
+	// 7. 离线补偿：本地一条都没投出去，且集群里也没人在线时才投 MQ。
 	// delivered > 0 就说明有人在收，不必再问一次 Redis。
 	if len(sc.receivers) > 0 && delivered == 0 && !s.anyRemoteOnline(ctx, sc.receivers) {
 		s.publishOffline(ctx, msg)
 	}
 	return dto, nil
+}
+
+// attachQuote 校验被引用消息，并把引用摘要并入 req.Extra。
+//
+// 摘要写进 Extra 而不是单开一列：Extra 本来就是「消息的附加信息」出口，
+// 加一列 varchar 要让 messages 的每次查询都多带一列，而引用只在渲染时读一次。
+func (s *MessageService) attachQuote(ctx context.Context, sc *sendContext) error {
+	if sc.req.QuoteMsgID == 0 {
+		return nil
+	}
+	if sc.req.QuoteMsgID < 0 {
+		return resp.WithMsg(resp.ErrInvalidParam, "引用消息 ID 非法")
+	}
+	q, err := s.deps.Messages.GetByID(ctx, sc.req.QuoteMsgID)
+	// 记录不存在与查询失败要分开：前者是被引用消息真的没了，属于参数问题；
+	// 后者是 DB 抖动，必须原样上抛，不能让一次读失败把用户的消息打成「引用非法」。
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	if err := checkQuote(q, sc.convID); err != nil {
+		return err
+	}
+	extra, err := mergeQuoteExtra(sc.req.Extra, &QuoteDTO{
+		MsgID: q.ID, FromID: q.FromID, Preview: quotePreview(q),
+	})
+	if err != nil {
+		return err
+	}
+	sc.req.Extra = extra
+	return nil
+}
+
+// checkQuote 校验引用目标：必须存在、与被引用方同一会话、且未被撤回。
+// 拆成纯函数是为了能在没有 MySQL 的环境里把三条分支全测到。
+func checkQuote(q *model.Message, convID string) error {
+	if q == nil || q.ID == 0 {
+		return resp.WithMsg(resp.ErrInvalidParam, "引用的消息不存在")
+	}
+	if q.ConvID != convID {
+		return resp.WithMsg(resp.ErrInvalidParam, "只能引用同一会话内的消息")
+	}
+	if q.Status == model.MsgStatusRecalled {
+		return resp.WithMsg(resp.ErrInvalidParam, "引用的消息已被撤回")
+	}
+	return nil
+}
+
+// mergeQuoteExtra 把引用摘要写进 extra 的 quote 字段，同时保留客户端已有的其它字段。
+//
+// 用 map[string]json.RawMessage 而不是固定结构体：extra 现在还承载图片宽高这类
+// 客户端自定义字段，换成结构体等于在序列化时把它们静默丢掉。
+func mergeQuoteExtra(extra string, q *QuoteDTO) (string, error) {
+	fields := map[string]json.RawMessage{}
+	if strings.TrimSpace(extra) != "" {
+		if err := json.Unmarshal([]byte(extra), &fields); err != nil {
+			return "", resp.WithMsg(resp.ErrInvalidParam, "扩展信息必须是 JSON 对象")
+		}
+	}
+	// extra 传 "null" 时 Unmarshal 不报错但把 map 置成 nil，直接赋值会 panic。
+	if fields == nil {
+		fields = map[string]json.RawMessage{}
+	}
+	raw, err := json.Marshal(q)
+	if err != nil {
+		return "", resp.WithMsg(resp.ErrInvalidParam, "引用信息无法序列化")
+	}
+	fields["quote"] = raw
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return "", resp.WithMsg(resp.ErrInvalidParam, "扩展信息无法序列化")
+	}
+	// 合并后要重新过一遍列宽：extra 本身接近 1024 时，多出来的引用信息会把它
+	// 顶到 1406，那样前端只能收到一个不含原因的 500。
+	if len(out) > maxExtraBytes {
+		return "", resp.WithMsg(resp.ErrInvalidParam, "扩展信息过长，无法附加引用")
+	}
+	return string(out), nil
+}
+
+// quotePreview 生成引用条里的原消息摘要。图片/文件用占位文案，与会话列表摘要
+// 同一套口径；正文按 rune 截断，否则中文会被切成半个字变成乱码。
+func quotePreview(m *model.Message) string {
+	switch m.MsgType {
+	case model.MsgImage:
+		return "[图片]"
+	case model.MsgFile:
+		return "[文件]"
+	}
+	r := []rune(m.Content)
+	if len(r) > maxQuotePreviewRunes {
+		return string(r[:maxQuotePreviewRunes]) + "..."
+	}
+	return m.Content
+}
+
+// quoteOf 从 extra 里取出引用摘要。extra 不是 JSON、没有 quote 字段或 ID 非法时
+// 返回 nil —— 引用功能上线前写入的老消息没有这个字段，必须照常下发。
+func quoteOf(extra string) *QuoteDTO {
+	if extra == "" {
+		return nil
+	}
+	var e struct {
+		Quote *QuoteDTO `json:"quote"`
+	}
+	if err := json.Unmarshal([]byte(extra), &e); err != nil {
+		return nil
+	}
+	if e.Quote == nil || e.Quote.MsgID <= 0 {
+		return nil
+	}
+	return e.Quote
 }
 
 // anyRemoteOnline 判断接收者里是否有人在线的权威版本。
@@ -751,7 +881,8 @@ func toDTO(m *model.Message, from *model.PublicUser) *MessageDTO {
 		ID: m.ID, ConvID: m.ConvID, ConvType: m.ConvType, Seq: m.Seq,
 		FromID: m.FromID, ToID: m.ToID, GroupID: m.GroupID,
 		ClientMsgID: m.ClientMsgID, MsgType: m.MsgType, Content: m.Content,
-		Extra: m.Extra, Status: m.Status, CreatedAt: m.CreatedAt, FromUser: from,
+		Extra: m.Extra, Quote: quoteOf(m.Extra), Status: m.Status,
+		CreatedAt: m.CreatedAt, FromUser: from,
 	}
 }
 
