@@ -58,12 +58,16 @@ func (m *Manager) Generate(userID int64, device string) (string, error) {
 // Parse 校验令牌并返回声明；过期与非法分别返回不同业务错误。
 func (m *Manager) Parse(tokenStr string) (*Claims, error) {
 	claims := &Claims{}
-	token, err := jwtlib.ParseWithClaims(tokenStr, claims, func(t *jwtlib.Token) (any, error) {
-		if _, ok := t.Method.(*jwtlib.SigningMethodHMAC); !ok {
-			return nil, errors.New("非预期的签名算法")
-		}
+	// 算法白名单交给 WithValidMethods 而不是在 keyfunc 里断言 HMAC 类型：
+	// 类型断言只挡得住非 HMAC 家族（none/RS/ES），HS384/HS512 会照样放行，
+	// 而签发侧只有 Generate 的 HS256，多放行一种就等于凭空多一条验签路径。
+	token, err := jwtlib.ParseWithClaims(tokenStr, claims, func(*jwtlib.Token) (any, error) {
 		return m.secret, nil
-	}, jwtlib.WithIssuer(m.issuer), jwtlib.WithExpirationRequired())
+	},
+		jwtlib.WithIssuer(m.issuer),
+		jwtlib.WithExpirationRequired(),
+		jwtlib.WithValidMethods([]string{jwtlib.SigningMethodHS256.Alg()}),
+	)
 
 	if err != nil {
 		if errors.Is(err, jwtlib.ErrTokenExpired) {
