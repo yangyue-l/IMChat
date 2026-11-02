@@ -141,6 +141,13 @@ type UploadConfig struct {
 	PublicBase string `yaml:"public_base"`
 }
 
+// MessageConfig 消息相关业务参数。
+type MessageConfig struct {
+	// RecallWindow 撤回时间窗，只约束「撤回自己发的消息」；
+	// 群管理员撤回他人消息不受它限制，否则违规内容过了窗口就再也处理不掉。
+	RecallWindow Duration `yaml:"recall_window"`
+}
+
 // Config 是全局配置根对象。
 type Config struct {
 	Server    ServerConfig    `yaml:"server"`
@@ -152,6 +159,7 @@ type Config struct {
 	Cache     CacheConfig     `yaml:"cache"`
 	JWT       JWTConfig       `yaml:"jwt"`
 	Upload    UploadConfig    `yaml:"upload"`
+	Message   MessageConfig   `yaml:"message"`
 }
 
 // Load 读取配置文件，随后用 IMCHAT_* 环境变量覆盖关键项，方便容器部署。
@@ -327,6 +335,10 @@ func (c *Config) applyDefaults() {
 	if c.Upload.MaxSizeMB == 0 {
 		c.Upload.MaxSizeMB = 10
 	}
+
+	if c.Message.RecallWindow == 0 {
+		c.Message.RecallWindow = Duration(2 * time.Minute)
+	}
 }
 
 // applyEnv 只覆盖最常变更的几项，避免引入配置中心依赖。
@@ -379,6 +391,10 @@ func (c *Config) validate() error {
 				return fmt.Errorf("ratelimit 启用 distributed 时 %s 的 limit/window 必须为正数", r.name)
 			}
 		}
+	}
+	// 撤回窗口写成负数等于「永远不许撤回」，多半是配置笔误，启动期就拦下来
+	if c.Message.RecallWindow < 0 {
+		return fmt.Errorf("message.recall_window 不能为负数，当前 %s", c.Message.RecallWindow.Get())
 	}
 	return nil
 }

@@ -87,3 +87,8 @@ upload:
   dir: "./uploads"
   max_size_mb: 10
   public_base: "/uploads"   # 对外访问前缀，留空则返回相对路径
+
+message:
+  # 撤回时间窗，只约束「撤回自己发的消息」；群管理员撤回他人消息不受此限制。
+  # 超过窗口后对方大概率已读过，再允许撤回就变成抹除证据的手段。
+  recall_window: 2m

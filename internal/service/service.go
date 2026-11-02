@@ -68,6 +68,12 @@ type Deps struct {
 	Groups   *repository.GroupRepo
 	Messages *repository.MessageRepo
 	Moments  *repository.MomentRepo
+
+	// RecallWindow 撤回时间窗（config.message.recall_window）。
+	// 这里传裸时长而不是整个 config：service 不依赖配置文件的组织形式，
+	// 换配置源（环境变量、配置中心）时业务层不需要跟着改。
+	// 为 0 时按默认值兜底，见 message.go 的 canRecall。
+	RecallWindow time.Duration
 }
 
 // Services 是全部业务服务的聚合入口。
@@ -87,7 +93,7 @@ func New(d Deps) *Services {
 		User:    &UserService{deps: d, rel: rel},
 		Friend:  &FriendService{deps: d, rel: rel},
 		Group:   &GroupService{deps: d, rel: rel},
-		Message: &MessageService{deps: d, rel: rel},
+		Message: &MessageService{deps: d, rel: rel, recallWindow: d.RecallWindow},
 		Moment:  &MomentService{deps: d, rel: rel},
 		rel:     rel,
 	}

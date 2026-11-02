@@ -100,6 +100,8 @@ func run(configPath string, nodeID int64) error {
 		Groups:   repository.NewGroupRepo(db),
 		Messages: repository.NewMessageRepo(db),
 		Moments:  repository.NewMomentRepo(db),
+
+		RecallWindow: cfg.Message.RecallWindow.Get(),
 	})
 
 	registerEventHandlers(registry, svc, log)
