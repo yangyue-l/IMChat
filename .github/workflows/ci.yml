@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# CI 只需要读仓库，显式收窄默认权限，避免第三方 action 拿到写权限。
+permissions:
+  contents: read
+
+# 同一分支连续推送时取消上一次没跑完的运行：既省 runner，
+# 也避免旧的失败结果比新提交更晚出现在页面上误导判断。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: build / vet / fmt / test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # 版本只认 go.mod 的 go 指令，不在 workflow 里再写一份，
+      # 否则升级 Go 时得改两处、迟早漂移。cache 默认就开，
+      # 显式写出来是为了让「缓存 module 与 build cache」这件事可被搜到。
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: build
+        run: go build ./...
+
+      - name: vet
+        run: go vet ./...
+
+      # gofmt 列出待格式化文件时退出码仍是 0，必须自己判输出再以非零退出，
+      # 否则格式问题会一路绿灯过去。检查范围与 Makefile 的 lint/fmt 保持一致。
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l ./cmd ./internal)"
+          if [ -n "$unformatted" ]; then
+            echo "以下文件未通过 gofmt："
+            echo "$unformatted"
+            exit 1
+          fi
+
+      # -count=1 关掉测试缓存：CI 里 MySQL/Redis/RabbitMQ 都没起，
+      # 依赖它们的用例走 t.Skip，缓存会把「真跑过一次」和「一直跳过」混成一样的日志。
+      # -race 只在 CI 上跑（本地 Windows 缺 cgo，见计划 D14 的说明）。
+      - name: test
+        run: go test -race -count=1 -timeout 5m ./...
