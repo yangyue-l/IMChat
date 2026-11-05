@@ -94,6 +94,8 @@ func NewRouter(cfg *config.Config, svc *service.Services, jwtMgr *jwt.Manager,
 			read.GET("/users/:user_id", r.getUser)
 			read.GET("/users/:user_id/online", r.userOnline)
 
+			read.GET("/sessions", r.listSessions)
+
 			read.GET("/friends", r.listFriends)
 			read.GET("/friend-requests", r.listFriendRequests)
 			read.GET("/blacklist", r.listBlacklist)
@@ -118,6 +120,7 @@ func NewRouter(cfg *config.Config, svc *service.Services, jwtMgr *jwt.Manager,
 		{
 			write.POST("/auth/logout", r.logout)
 			write.PATCH("/users/me", r.updateProfile)
+			write.DELETE("/sessions/:device", r.kickDevice)
 
 			write.DELETE("/friends/:friend_id", r.deleteFriend)
 			write.PATCH("/friends/:friend_id", r.updateFriend)

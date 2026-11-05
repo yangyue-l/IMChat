@@ -223,8 +223,9 @@ NextSeq(convID)
 | TTL | key 级 150s = `ws_ping_interval`(30s) × (2 × 2 + 1)；成员级由 score 表达 |
 | 写入 | 握手 `Hub.MarkOnline`；心跳每 2 次 `Client.renewOnline` 一次；退出 `Hub.markOffline` → `ZREM` |
 | 判定 | `cache.OnlineSet` 一次 pipeline 批量 `ZCOUNT key <now> +inf`，返回在线集合；**不看 key 级 TTL** |
+| 列举 | `cache.ListDevices` 用 `ZRANGEBYSCORE key <now> +inf WITHSCORES`，按 score 倒序（越近活跃越前）；过期成员由 score 区间直接过滤，不进内存 |
 
-**使用场景**：判断接收者是否在线，决定要不要投离线消息；查询用户在线状态（仅限自己或好友）。
+**使用场景**：判断接收者是否在线，决定要不要投离线消息；查询用户在线状态（仅限自己或好友）；登录设备管理（列出 / 踢掉某设备）。
 
 **为什么 score 存过期时刻而不是用 set + key TTL**：多端共用一个 key，任一设备心跳都会刷新整个 key 的 TTL，已断开设备的成员就会被无限期保留，在线判定恒为 true。把过期时刻放进 score，`ZREMRANGEBYSCORE` 每次写入顺手清理，单设备掉线不会被其他设备「续命」。
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -91,6 +92,30 @@ func (s *shard) has(uid int64) bool {
 	return len(s.conns[uid]) > 0
 }
 
+// devices 返回该用户在本分片上的设备名。排序是为了让上层合并 Redis 那份之后
+// 仍能给出稳定的顺序：map 遍历顺序随机，原样输出会让设备列表每次刷新都换行。
+func (s *shard) devices(uid int64) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	m := s.conns[uid]
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(m))
+	for device := range m {
+		out = append(out, device)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// conn 取某用户某设备当前的连接，没有则返回 nil。
+func (s *shard) conn(uid int64, device string) *Client {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.conns[uid][device]
+}
+
 // accept 判断能否再接入一个连接。同设备重连总是放行，它只会顶掉旧连接，
 // 不增加总数；新设备才受 maxConns 约束。
 func (s *shard) accept(uid int64, device string, maxConns int) bool {
@@ -123,6 +148,8 @@ type OnlineStore interface {
 	SetOnline(ctx context.Context, uid int64, device string, ttl time.Duration) error
 	SetOffline(ctx context.Context, uid int64, device string) error
 	OnlineSet(ctx context.Context, uids []int64) (map[int64]bool, error)
+	// ListDevices 返回某用户在线的设备名，供「登录设备管理」使用。
+	ListDevices(ctx context.Context, uid int64) ([]string, error)
 }
 
 // busMessage 是跨节点广播的消息体。
@@ -315,8 +342,74 @@ func (h *Hub) Online(uids []int64) (map[int64]bool, error) {
 	return out, nil
 }
 
-// CanAccept 判断是否接纳新连接，maxConns 为单用户最大在线设备数（<=0 不限制）。
+// Devices 返回某用户当前在线的设备名，实现 service.Presence。
 //
+// 与 Online 一样是「本地优先、集群才回源」两段式，原因也一样：单机部署根本不写
+// im:online:（见 cache/presence.go 与 docs/redis-keys.md 的已知限制），只查 Redis
+// 会恒返回空列表。本地分片是权威，开了集群才把落在其他节点的设备并进来。
+//
+// 回源失败必须把 error 抛出去：列表不全等于让用户以为「只剩这一台设备登录着」，
+// 而这正是账号被盗时最不该给的结论。
+func (h *Hub) Devices(uid int64) ([]string, error) {
+	local := h.shardOf(uid).devices(uid)
+	if !h.clusterEnabled || h.online == nil {
+		return local, nil
+	}
+
+	ctx, cancel := h.bgContext()
+	defer cancel()
+	remote, err := h.online.ListDevices(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	if len(remote) == 0 {
+		return local, nil
+	}
+
+	seen := make(map[string]struct{}, len(local)+len(remote))
+	out := make([]string, 0, len(local)+len(remote))
+	for _, list := range [][]string{local, remote} {
+		for _, device := range list {
+			if _, ok := seen[device]; ok {
+				continue
+			}
+			seen[device] = struct{}{}
+			out = append(out, device)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// KickDevice 断开某用户某设备的连接，返回本节点断开的连接数
+// （实现 service.DeviceKicker）。
+//
+// 用 WebSocket 的 Close 控制帧（4001）而不是业务 kick 帧：业务帧要进发送队列，
+// 若在它写出之前连接已被关掉，客户端什么都收不到，只会看到「连接异常断开」；
+// Close 控制帧由 WriteControl 直接写，且允许与其他写操作并发。
+//
+// 集群下同一设备可能连在别的节点，本节点断不了那条 socket：广播一条 kick 帧，
+// 由客户端按 data.device 判断要不要自行断开。本节点刚关掉的连接收不到这条，
+// 正好也不必对它重复通知。
+func (h *Hub) KickDevice(uid int64, device string) int {
+	n := 0
+	if c := h.shardOf(uid).conn(uid, device); c != nil {
+		c.kick()
+		n = 1
+	}
+	if h.clusterEnabled {
+		frame, err := json.Marshal(map[string]any{
+			"type": "kick",
+			"data": map[string]any{"device": device, "reason": "kicked_by_user"},
+		})
+		if err == nil {
+			h.publishBus([]int64{uid}, frame)
+		}
+	}
+	return n
+}
+
+// CanAccept 判断是否接纳新连接，maxConns 为单用户最大在线设备数（<=0 不限制）。
 // 只在本节点内计数：多实例部署下每个节点各自允许 maxConns 个连接，
 // 精确的全局连接数需要 Redis 计数，代价是每次握手一次往返，
 // 而连接数本身已被握手限流压住，这里取本地判断足够。

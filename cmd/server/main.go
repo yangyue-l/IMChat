@@ -94,7 +94,7 @@ func run(configPath string, nodeID int64) error {
 	hub := ws.NewHub(cfg, rdb, store, nodeTag, log)
 	svc := service.New(service.Deps{
 		DB: db, Cache: store, JWT: jwtMgr,
-		Pusher: hub, Presence: hub, Pub: publisher,
+		Pusher: hub, Presence: hub, Kicker: hub, Pub: publisher,
 		Users:    repository.NewUserRepo(db),
 		Friends:  repository.NewFriendRepo(db),
 		Groups:   repository.NewGroupRepo(db),

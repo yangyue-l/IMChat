@@ -2,6 +2,7 @@ package ws
 
 import (
 	"bytes"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -90,4 +91,68 @@ func waitFrames(t *testing.T, hub *Hub, recv, sent int64) {
 	}
 	t.Fatalf("帧计数未达期望：recv=%d(期望 %d) sent=%d(期望 %d)",
 		hub.RecvFrames(), recv, hub.SentFrames(), sent)
+}
+
+// TestKickDeviceClosesConnection 验证踢线真的断掉连接，并把关闭码带给客户端。
+//
+// 走真实握手而不是直接调 Client.kick：要证明的是「关掉连接之后收尾流程照常跑完」——
+// 分片注销与在线态清理都挂在 run() 的退出路径上，漏了就会留下一条永远不会离线、
+// 也永远收不到消息的幽灵连接。顺带锁住「不匹配的设备名一条连接都不断」，
+// 那是踢错端的唯一可能来源。
+func TestKickDeviceClosesConnection(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Cluster.Shards = 4 // 单机模式：收尾路径不碰 Redis
+	cfg.Server.WSWriteWait = config.Duration(2 * time.Second)
+	cfg.Server.WSPongWait = config.Duration(5 * time.Second)
+	cfg.Server.WSPingInterval = config.Duration(time.Hour)
+	cfg.Server.WSSendBuffer = 16
+	hub := NewHub(cfg, nil, nil, "test-node", slog.Default())
+
+	ready := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		up := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		c := newClient(hub, conn, 42, "web")
+		hub.register(c)
+		close(ready)
+		go c.run()
+	}))
+	defer srv.Close()
+
+	cli, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("拨号失败: %v", err)
+	}
+	defer cli.Close()
+	<-ready
+
+	if n := hub.KickDevice(42, "ios"); n != 0 {
+		t.Fatalf("设备名不匹配时不应断开任何连接，实际 %d", n)
+	}
+	if n := hub.KickDevice(42, "web"); n != 1 {
+		t.Fatalf("期望断开 1 条连接，实际 %d", n)
+	}
+
+	_ = cli.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := cli.ReadMessage(); err == nil {
+		t.Fatal("踢线后连接应已断开")
+	} else {
+		var ce *websocket.CloseError
+		if !errors.As(err, &ce) || ce.Code != closeCodeKicked {
+			t.Fatalf("期望关闭码 %d，实际 %v", closeCodeKicked, err)
+		}
+	}
+
+	// 连接断开后收尾是异步的，等分片里的记录被清掉
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !hub.LocalOnline(42) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("踢线后连接应已从分片注销")
 }

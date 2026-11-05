@@ -11,6 +11,10 @@ type stubPresence struct {
 	online map[int64]bool
 	err    error
 	calls  [][]int64
+
+	devices     []string
+	devicesErr  error
+	deviceCalls []int64
 }
 
 func (s *stubPresence) Online(uids []int64) (map[int64]bool, error) {
@@ -25,6 +29,14 @@ func (s *stubPresence) Online(uids []int64) (map[int64]bool, error) {
 		}
 	}
 	return out, nil
+}
+
+func (s *stubPresence) Devices(uid int64) ([]string, error) {
+	s.deviceCalls = append(s.deviceCalls, uid)
+	if s.devicesErr != nil {
+		return nil, s.devicesErr
+	}
+	return s.devices, nil
 }
 
 // TestOnlineSelfSkipsRelation 验证查自己不需要走关系校验。

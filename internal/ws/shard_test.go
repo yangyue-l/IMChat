@@ -275,3 +275,36 @@ func assertNoUidEntryLeft(t *testing.T, h *Hub) {
 		}
 	}
 }
+
+// TestShardDevices 验证设备名列举：按名字排序、不串号、注销后立刻消失。
+//
+// 排序不是锦上添花：map 遍历顺序随机，原样输出会让「登录设备管理」每次刷新
+// 都换一个行序，用户会以为设备列表在乱跳。conn 则要锁住「只取本设备」，
+// 取错就等于踢错了端。
+func TestShardDevices(t *testing.T) {
+	s := newShard()
+	if got := s.devices(1); got != nil {
+		t.Fatalf("没连过的用户应返回 nil，实际 %v", got)
+	}
+
+	web := &Client{uid: 1, device: "web"}
+	s.add(web)
+	s.add(&Client{uid: 1, device: "android"})
+	s.add(&Client{uid: 2, device: "pad"})
+
+	got := s.devices(1)
+	if len(got) != 2 || got[0] != "android" || got[1] != "web" {
+		t.Fatalf("期望按名字排序的 [android web]，实际 %v", got)
+	}
+	if c := s.conn(1, "web"); c != web {
+		t.Fatalf("conn(1, web) 应取到 web 连接，实际 %v", c)
+	}
+	if c := s.conn(1, "pad"); c != nil {
+		t.Fatalf("conn 不应串到别的用户，实际 %v", c)
+	}
+
+	s.remove(web)
+	if got := s.devices(1); len(got) != 1 || got[0] != "android" {
+		t.Fatalf("注销后应只剩 android，实际 %v", got)
+	}
+}

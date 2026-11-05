@@ -93,6 +93,9 @@ type stubOnlineStore struct {
 	online map[int64]bool
 	err    error
 	asked  [][]int64
+
+	devices     map[int64][]string
+	deviceAsked []int64
 }
 
 func (s *stubOnlineStore) SetOnline(context.Context, int64, string, time.Duration) error {
@@ -113,6 +116,14 @@ func (s *stubOnlineStore) OnlineSet(_ context.Context, uids []int64) (map[int64]
 		}
 	}
 	return out, nil
+}
+
+func (s *stubOnlineStore) ListDevices(_ context.Context, uid int64) ([]string, error) {
+	s.deviceAsked = append(s.deviceAsked, uid)
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.devices[uid], nil
 }
 
 // TestOnlineMergesLocalAndRemote 验证集群模式的合并语义：
@@ -226,5 +237,70 @@ func TestPushToUsersCoversEveryConn(t *testing.T) {
 	// 混合离线 uid 时，投递数只算真实连接
 	if n := h.PushToUsers([]int64{1, 999}, payload); n != 2 {
 		t.Fatalf("离线用户不计入投递数，期望 2 实际 %d", n)
+	}
+}
+
+// TestDevicesWithoutCluster 验证单机模式直接读本地分片。
+//
+// 单机部署根本不写 im:online:（MarkOnline 被 cluster 开关挡住），所以这里
+// rdb 与 online store 都是 nil：Devices 一旦走上 Redis 分支就立刻露馅。
+// 这也是「设备列表只有 Redis 一份」这种实现最容易踩的坑 —— 单机永远返回空。
+func TestDevicesWithoutCluster(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Cluster.Enabled = false
+	cfg.Cluster.Shards = 4
+	h := NewHub(cfg, nil, nil, "test-node", slog.Default())
+
+	if got, err := h.Devices(99); err != nil || len(got) != 0 {
+		t.Fatalf("未连接的用户应返回空列表，实际 %v err=%v", got, err)
+	}
+
+	h.register(newTestClient(h, 99, "web"))
+	h.register(newTestClient(h, 99, "android"))
+	got, err := h.Devices(99)
+	if err != nil {
+		t.Fatalf("Devices 异常: %v", err)
+	}
+	// 顺序必须稳定：map 遍历随机，客户端每次刷新换行就是这里漏了排序
+	if len(got) != 2 || got[0] != "android" || got[1] != "web" {
+		t.Fatalf("期望按设备名排序的 [android web]，实际 %v", got)
+	}
+}
+
+// TestDevicesMergesLocalAndRemote 验证集群模式把本节点与其他节点的设备合并去重。
+// 同一台设备既在本节点连着、Redis 里也有记录时只能出现一次。
+func TestDevicesMergesLocalAndRemote(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Cluster.Enabled = true
+	cfg.Cluster.Shards = 4
+	store := &stubOnlineStore{devices: map[int64][]string{1: {"ios", "web"}}}
+	h := NewHub(cfg, nil, store, "test-node", slog.Default())
+
+	h.register(newTestClient(h, 1, "web"))
+	got, err := h.Devices(1)
+	if err != nil {
+		t.Fatalf("Devices 异常: %v", err)
+	}
+	if len(got) != 2 || got[0] != "ios" || got[1] != "web" {
+		t.Fatalf("期望去重后的 [ios web]，实际 %v", got)
+	}
+	if len(store.deviceAsked) != 1 || store.deviceAsked[0] != 1 {
+		t.Fatalf("应恰好回源一次 uid 1，实际 %v", store.deviceAsked)
+	}
+}
+
+// TestDevicesPropagatesStoreError 验证回源失败不会被吞成「没有其他设备」。
+//
+// 列表不全等于告诉用户「只剩本机登录着」，而这正是账号被盗时最不该给的结论，
+// 所以这里必须把错误抛给上层，让它回 500 而不是一份看起来正常的空列表。
+func TestDevicesPropagatesStoreError(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Cluster.Enabled = true
+	cfg.Cluster.Shards = 4
+	boom := errors.New("redis down")
+	h := NewHub(cfg, nil, &stubOnlineStore{err: boom}, "test-node", slog.Default())
+
+	if _, err := h.Devices(1); !errors.Is(err, boom) {
+		t.Fatalf("应透出回源错误，实际 %v", err)
 	}
 }

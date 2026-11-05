@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,6 +32,34 @@ func (c *Cache) SetOnline(ctx context.Context, uid int64, device string, ttl tim
 // SetOffline 移除某个在线设备。
 func (c *Cache) SetOffline(ctx context.Context, uid int64, device string) error {
 	return c.rdb.ZRem(ctx, fmt.Sprintf("%s%d", keyOnline, uid), device).Err()
+}
+
+// ListDevices 返回该用户当前在线的设备名，最近一次心跳的排在前面。
+//
+// score 就是设备自身的过期时刻，所以「在线」等价于 score >= now，
+// 直接交给 ZRANGEBYSCORE 取区间即可：过期成员不会被读进内存再过滤一遍，
+// 也不会因为忘了过滤而把早就掉线的设备列出来。
+//
+// 倒序是给「登录设备管理」用的：最近活跃的通常是用户手上的那台，
+// 排在前面既符合直觉，也让同一份数据每次返回的顺序稳定（ZSET 同分按成员字典序，
+// 反转后依然确定），客户端不会一刷新就换行。
+func (c *Cache) ListDevices(ctx context.Context, uid int64) ([]string, error) {
+	key := fmt.Sprintf("%s%d", keyOnline, uid)
+	now := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	items, err := c.rdb.ZRangeByScoreWithScores(ctx, key, &redis.ZRangeBy{
+		Min: now,
+		Max: "+inf",
+	}).Result()
+	if err != nil {
+		return nil, err
+	}
+	devices := make([]string, 0, len(items))
+	for i := len(items) - 1; i >= 0; i-- {
+		// Member 是 string（写入侧就是设备名），用 Sprint 兜住极端情况下的类型差异，
+		// 免得一次断言失败把整份列表带 panic。
+		devices = append(devices, fmt.Sprint(items[i].Member))
+	}
+	return devices, nil
 }
 
 // OnlineSet 返回这批用户里在线的那些，map 中存在的 uid 即为在线。

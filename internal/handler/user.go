@@ -113,3 +113,32 @@ func (r *Router) userOnline(c *gin.Context) {
 	}
 	resp.OK(c, gin.H{"user_id": id, "online": online})
 }
+
+// listSessions 列出当前账号在线的设备。
+//
+// current 用令牌里的 device 标注而不写进 service：设备列表是「这个账号有哪些端」，
+// 「哪一个是本机」取决于这次请求用的是哪个令牌，属于传输层语义。
+// 客户端据此把本机排在第一行、并隐掉它的踢线按钮。
+func (r *Router) listSessions(c *gin.Context) {
+	devices, err := r.svc.User.Sessions(c.Request.Context(), middleware.UID(c))
+	if err != nil {
+		resp.Fail(c, err)
+		return
+	}
+	current := middleware.Device(c)
+	items := make([]gin.H, 0, len(devices))
+	for _, device := range devices {
+		items = append(items, gin.H{"device": device, "current": device == current})
+	}
+	resp.OK(c, gin.H{"devices": items})
+}
+
+// kickDevice 踢掉指定设备的登录。允许踢当前设备，客户端收到 4001 后重连。
+func (r *Router) kickDevice(c *gin.Context) {
+	device := c.Param("device")
+	if err := r.svc.User.KickDevice(c.Request.Context(), middleware.UID(c), device); err != nil {
+		resp.Fail(c, err)
+		return
+	}
+	resp.OK(c, gin.H{"device": device})
+}

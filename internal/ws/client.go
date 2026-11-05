@@ -13,6 +13,11 @@ import (
 const (
 	maxMessageSize = 8 << 10 // 单帧上限 8KB，超出直接断开，防内存攻击
 	writeWait      = 10 * time.Second
+
+	// closeCodeKicked 是「服务端主动踢线」的应用层关闭码。
+	// 取 4001 而不是 1008（策略违规）：被踢是用户自己选的设备管理动作，
+	// 不是协议层面的违规，客户端据此提示「该设备已退出登录」并停止自动重连。
+	closeCodeKicked = 4001
 )
 
 // Client 表示一条 WebSocket 连接。读写各一个 goroutine，关闭时只做一次清理。
@@ -152,6 +157,16 @@ func (c *Client) Close() {
 		close(c.closed)
 		_ = c.conn.Close()
 	})
+}
+
+// kick 由服务端主动断开连接：先发 Close 控制帧说明原因，再关连接。
+// 连接关掉后 readLoop 立刻返回，收尾流程照常注销分片并清在线态，
+// 与客户端自己掉线走的是同一条路径，不需要额外的状态。
+func (c *Client) kick() {
+	_ = c.conn.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(closeCodeKicked, "kicked"),
+		time.Now().Add(writeWait))
+	c.Close()
 }
 
 // markOffline 清除在线状态。

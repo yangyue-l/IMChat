@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 // TestPresenceKeyType 锁住在线的 Key 类型必须是 zset。
@@ -103,5 +105,59 @@ func TestPresenceOnlineSet(t *testing.T) {
 	}
 	if got, err := c.OnlineSet(ctx, uids); err != nil || len(got) != 0 {
 		t.Fatalf("过期后期望空结果，实际 %v err=%v", got, err)
+	}
+}
+
+// TestPresenceListDevices 验证设备列举：只返回未过期成员，最近活跃的排在前面。
+//
+// 直接 ZADD 一个 score 已过期的成员来模拟老数据：SetOnline 的脚本会顺手清理，
+// 但历史遗留（或时钟漂移）仍可能留下过期成员，列表里出现它就是「已下线的设备
+// 还显示在线」，用户会以为账号被人用着。
+func TestPresenceListDevices(t *testing.T) {
+	c := newTestCache(t)
+	ctx := context.Background()
+	uid := time.Now().UnixNano()
+	key := keyOnline + strconv.FormatInt(uid, 10)
+	t.Cleanup(func() { _ = c.rdb.Del(ctx, key) })
+
+	if got, err := c.ListDevices(ctx, uid); err != nil || len(got) != 0 {
+		t.Fatalf("没有在线设备时期望空列表，实际 %v err=%v", got, err)
+	}
+
+	for device, ttl := range map[string]time.Duration{
+		"web":     time.Minute,
+		"ios":     2 * time.Minute,
+		"android": 3 * time.Minute,
+	} {
+		if err := c.SetOnline(ctx, uid, device, ttl); err != nil {
+			t.Fatalf("SetOnline(%s) 异常: %v", device, err)
+		}
+	}
+	got, err := c.ListDevices(ctx, uid)
+	if err != nil {
+		t.Fatalf("ListDevices 异常: %v", err)
+	}
+	want := []string{"android", "ios", "web"} // 过期时刻越晚 = 越近活跃
+	if len(got) != len(want) {
+		t.Fatalf("期望 %v，实际 %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("期望 %v，实际 %v", want, got)
+		}
+	}
+
+	stale := redis.Z{Score: float64(time.Now().Add(-time.Minute).UnixMilli()), Member: "stale"}
+	if err := c.rdb.ZAdd(ctx, key, stale).Err(); err != nil {
+		t.Fatalf("写入过期成员失败: %v", err)
+	}
+	got, err = c.ListDevices(ctx, uid)
+	if err != nil {
+		t.Fatalf("ListDevices 异常: %v", err)
+	}
+	for _, device := range got {
+		if device == "stale" {
+			t.Fatalf("过期成员不应出现在列表里，实际 %v", got)
+		}
 	}
 }

@@ -34,6 +34,18 @@ type Presence interface {
 	// Online 返回这批用户里在线的那些，map 中存在的 uid 即为在线。
 	// 实现失败时返回 error 而不是空 map：调用方需要能区分「不在线」与「查不到」。
 	Online(uids []int64) (map[int64]bool, error)
+	// Devices 返回某用户在线的设备名，供「登录设备管理」列出设备。
+	Devices(uid int64) ([]string, error)
+}
+
+// DeviceKicker 是「断开某用户某设备连接」能力的抽象，由 ws.Hub 实现。
+//
+// 单独一个接口而不是并进 Pusher：推送是「发数据」，踢线是「断连接」，
+// 失败语义完全不同（帧丢了可以重发，连接断了就断了），混在一起只会让
+// 只关心推送的替身被迫实现一个空方法。
+type DeviceKicker interface {
+	// KickDevice 断开该设备在本节点的连接，返回实际断开的连接数。
+	KickDevice(uid int64, device string) int
 }
 
 // Event 是投递到消息队列的异步事件。
@@ -61,6 +73,7 @@ type Deps struct {
 	JWT      *jwt.Manager
 	Pusher   Pusher
 	Presence Presence
+	Kicker   DeviceKicker
 	Pub      Publisher
 
 	Users    *repository.UserRepo

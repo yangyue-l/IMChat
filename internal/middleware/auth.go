@@ -54,6 +54,12 @@ func Token(c *gin.Context) string {
 	return c.GetString(TokenKey)
 }
 
+// Device 从上下文取当前令牌绑定的设备标识。
+// 登录时未指定设备的令牌这里为空串，调用方需要自己决定怎么展示。
+func Device(c *gin.Context) string {
+	return c.GetString(DeviceKey)
+}
+
 func extractToken(c *gin.Context) string {
 	if auth := c.GetHeader("Authorization"); auth != "" {
 		if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
