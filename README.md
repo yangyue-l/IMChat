@@ -170,6 +170,7 @@ IMChat/
 
 - 按用户维度令牌桶限流，本地实现零网络开销，定时清理闲置桶。
 - JWT 无状态校验 + Redis 登出黑名单。
+- 业务码统一出口 `internal/pkg/resp`，各码的触发场景与客户端分流口径见 `docs/error-codes.md`。
 - 全链路 `context` 超时，`http.Server` 各阶段超时显式设置。
 - 优雅停机：先停 HTTP，再断 WS，再停消费，最后释放连接。
 
