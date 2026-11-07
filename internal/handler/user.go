@@ -76,7 +76,12 @@ func (r *Router) updateProfile(c *gin.Context) {
 // searchUsers 搜索用户。
 func (r *Router) searchUsers(c *gin.Context) {
 	uid := middleware.UID(c)
-	list, err := r.svc.User.Search(c.Request.Context(), uid, c.Query("keyword"), queryInt(c, "limit", 20))
+	limit, err := queryNonNegInt(c, "limit")
+	if err != nil {
+		resp.Fail(c, err)
+		return
+	}
+	list, err := r.svc.User.Search(c.Request.Context(), uid, c.Query("keyword"), limit)
 	if err != nil {
 		resp.Fail(c, err)
 		return

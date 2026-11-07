@@ -45,8 +45,12 @@ func (r *Router) history(c *gin.Context) {
 		resp.Fail(c, resp.WithMsg(resp.ErrInvalidParam, "缺少 conv_id"))
 		return
 	}
-	list, err := r.svc.Message.History(c.Request.Context(), middleware.UID(c), convID,
-		queryInt64(c, "before_seq", 0), queryInt(c, "limit", 20))
+	beforeSeq, limit, err := queryCursorPage(c, "before_seq")
+	if err != nil {
+		resp.Fail(c, err)
+		return
+	}
+	list, err := r.svc.Message.History(c.Request.Context(), middleware.UID(c), convID, beforeSeq, limit)
 	if err != nil {
 		resp.Fail(c, err)
 		return

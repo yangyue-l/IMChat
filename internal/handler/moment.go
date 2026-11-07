@@ -25,8 +25,12 @@ func (r *Router) publishMoment(c *gin.Context) {
 
 // momentTimeline 好友动态流。
 func (r *Router) momentTimeline(c *gin.Context) {
-	list, err := r.svc.Moment.Timeline(c.Request.Context(), middleware.UID(c),
-		queryInt64(c, "before_id", 0), queryInt(c, "limit", 10))
+	beforeID, limit, err := queryCursorPage(c, "before_id")
+	if err != nil {
+		resp.Fail(c, err)
+		return
+	}
+	list, err := r.svc.Moment.Timeline(c.Request.Context(), middleware.UID(c), beforeID, limit)
 	if err != nil {
 		resp.Fail(c, err)
 		return
@@ -41,8 +45,12 @@ func (r *Router) userMoments(c *gin.Context) {
 		resp.Fail(c, err)
 		return
 	}
-	list, err := r.svc.Moment.UserMoments(c.Request.Context(), middleware.UID(c), authorID,
-		queryInt64(c, "before_id", 0), queryInt(c, "limit", 10))
+	beforeID, limit, err := queryCursorPage(c, "before_id")
+	if err != nil {
+		resp.Fail(c, err)
+		return
+	}
+	list, err := r.svc.Moment.UserMoments(c.Request.Context(), middleware.UID(c), authorID, beforeID, limit)
 	if err != nil {
 		resp.Fail(c, err)
 		return

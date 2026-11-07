@@ -6,6 +6,9 @@
 - 鉴权：`Authorization: Bearer <token>`（WebSocket 用 `?token=`）
 - 请求/响应均为 `application/json`
 - `int64` 类型 ID 一律**以字符串返回**，避免前端精度丢失
+- 分页参数（`offset` / `limit` / `before_seq` / `before_id`）传非整数或负数一律返回 `40000`，
+  **不会静默退回默认值**：游标或 offset 被静默归零会让「加载更多」永远重复拉第一页，
+  而客户端看不出自己传错了；`0` 表示没传，由服务端按各接口的缺省值处理
 
 响应结构：
 
