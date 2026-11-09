@@ -58,6 +58,26 @@ func (r *Router) history(c *gin.Context) {
 	resp.OK(c, list)
 }
 
+// searchMessages 会话内关键词检索。
+func (r *Router) searchMessages(c *gin.Context) {
+	convID := c.Query("conv_id")
+	if convID == "" {
+		resp.Fail(c, resp.WithMsg(resp.ErrInvalidParam, "缺少 conv_id"))
+		return
+	}
+	limit, err := queryNonNegInt(c, "limit")
+	if err != nil {
+		resp.Fail(c, err)
+		return
+	}
+	list, err := r.svc.Message.Search(c.Request.Context(), middleware.UID(c), convID, c.Query("keyword"), limit)
+	if err != nil {
+		resp.Fail(c, err)
+		return
+	}
+	resp.OK(c, list)
+}
+
 // sendPrivate 发送私聊消息（HTTP 通道，WS 通道同样可用）。
 func (r *Router) sendPrivate(c *gin.Context) {
 	var req service.SendReq

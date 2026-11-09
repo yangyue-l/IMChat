@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"strings"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -44,6 +45,46 @@ func (r *MessageRepo) ListByConv(ctx context.Context, convID string, beforeSeq i
 	}
 	err := q.Order("seq DESC").Limit(limit).Find(&list).Error
 	return list, err
+}
+
+// SearchByConv 在单个会话内按内容关键词检索，按 seq 倒序返回最近的一批。
+//
+// 用 LIKE 而不是全文索引：messages.content 是 text，没有 ngram 索引，
+// LIKE '%kw%' 必须逐行比对，代价与「会话内消息总数」成正比。因此它只适合
+// 「在这个会话里找最近说过的一句话」这种小范围检索；要做全局/历史全文检索，
+// 应当上 MySQL 全文索引或外部搜索引擎，不要在这里堆条件硬扛。
+//
+// 必须排除已撤回的消息：撤回只把 status 置位，正文原样留在库里。
+// 少这一个条件，「撤回」对检索就完全失效 —— 内容照样能被搜出来。
+func (r *MessageRepo) SearchByConv(ctx context.Context, convID, keyword string, limit int) ([]model.Message, error) {
+	var list []model.Message
+	err := r.searchQuery(ctx, convID, keyword, limit).Find(&list).Error
+	return list, err
+}
+
+// searchQuery 组装检索条件。
+//
+// 单独拆出来是为了能在没有 MySQL 的环境里用 DryRun 断言 SQL —— 尤其
+// 「排除已撤回」那条，它在功能测试里需要真库才看得见，重构时最容易被顺手删掉，
+// 而删掉之后没有任何报错：撤回过的内容照样能被搜出来，用户以为撤回成功了。
+func (r *MessageRepo) searchQuery(ctx context.Context, convID, keyword string, limit int) *gorm.DB {
+	return r.db.WithContext(ctx).
+		Where("conv_id = ?", convID).
+		Where("content LIKE ?", likePattern(keyword)).
+		Where("status <> ?", model.MsgStatusRecalled).
+		Order("seq DESC").Limit(limit)
+}
+
+// likeEscaper 把用户输入里的 LIKE 通配符转成字面量。
+//
+// 不转义的话搜 "%" 会命中整个会话、"_" 会变成任意单字符：用户拿到的结果
+// 跟自己输入的内容毫无关系，还以为检索坏了，实际是全表扫描却什么都没筛。
+// 反斜杠本身也要先转义，否则输入 "\%" 会变成「转义符 + 通配符」。
+var likeEscaper = strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`)
+
+// likePattern 构造两侧模糊匹配的模式串。
+func likePattern(keyword string) string {
+	return "%" + likeEscaper.Replace(keyword) + "%"
 }
 
 // MaxSeq 返回会话当前最大序号。既是未读兜底计算的数据源，

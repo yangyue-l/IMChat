@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sort"
 	"strings"
@@ -35,6 +36,13 @@ const (
 	defaultRecallWindow = 2 * time.Minute
 	// 引用摘要在气泡里只占一行，超过这个长度必然是省略号，存全文纯属浪费列宽。
 	maxQuotePreviewRunes = 64
+	// 关键词检索的边界。下限 2 个 rune 挡掉单字检索：LIKE '%a%' 会扫出整个会话，
+	// 既没有检索价值又是一次全表扫描；上限 32 与 IM 里「一句话关键词」的实际形态对齐，
+	// 再长的输入更适合拿去翻历史，而不是让 LIKE 去比对一长串文本。
+	minKeywordRunes    = 2
+	maxKeywordRunes    = 32
+	defaultSearchLimit = 20
+	maxSearchLimit     = 50
 )
 
 // SendReq 发送消息参数。私聊填 ToID，群聊填 GroupID，用 ConvType 区分。
@@ -483,8 +491,77 @@ func (s *MessageService) History(ctx context.Context, uid int64, convID string, 
 	if err != nil {
 		return nil, err
 	}
+	out, err := s.withSenders(ctx, list)
+	if err != nil {
+		return nil, err
+	}
+	// 仓储按 seq 倒序取（才能用 LIMIT 拿到「最近的一页」），历史消息要正序渲染。
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
+}
+
+// Search 在指定会话内按关键词检索消息，按 seq 倒序返回（新消息在前）。
+//
+// 与 History 的差别不只是「多一个 WHERE」：检索结果没有翻页游标，
+// 一次给最近的 limit 条即可 —— 关键词检索的意图是「找到那句话」，
+// 要往下翻就换个更准的关键词，而不是继续拉第 20 页。
+func (s *MessageService) Search(ctx context.Context, uid int64, convID, keyword string, limit int) ([]MessageDTO, error) {
+	// 参数校验排在鉴权之前：这一步不查库、也不泄露会话是否存在，
+	// 让非法请求连一次 DB 往返都省下来。权限校验仍然早于消息查询。
+	kw, err := normalizeKeyword(keyword)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.checkConvAccess(ctx, uid, convID); err != nil {
+		return nil, err
+	}
+	list, err := s.deps.Messages.SearchByConv(ctx, convID, kw, normalizeSearchLimit(limit))
+	if err != nil {
+		return nil, err
+	}
+	return s.withSenders(ctx, list)
+}
+
+// normalizeSearchLimit 归一化检索条数：缺省 20，超限压到上限。
+//
+// 超限是「压到 50」而不是像 History 那样退回默认值 —— 退回默认值会让 limit=51
+// 只拿到 20 条，比 limit=50 的 50 条还少，非单调的结果只会被当成 bug 报上来。
+func normalizeSearchLimit(limit int) int {
+	if limit <= 0 {
+		return defaultSearchLimit
+	}
+	if limit > maxSearchLimit {
+		return maxSearchLimit
+	}
+	return limit
+}
+
+// normalizeKeyword 校验并裁剪检索关键词，返回可直接进 SQL 的值。
+//
+// 按 rune 而不是字节计数：一个汉字占 3 字节，按字节算上限 32 就只剩 10 个汉字，
+// 中文用户随手一句关键词就被判超长。裁剪首尾空白是必须的 —— 用户从聊天记录里
+// 复制关键词常带上空格，带空格的 pattern 匹配不到任何东西，看起来就像「搜不到」。
+func normalizeKeyword(keyword string) (string, error) {
+	kw := strings.TrimSpace(keyword)
+	if n := utf8.RuneCountInString(kw); n < minKeywordRunes || n > maxKeywordRunes {
+		return "", resp.WithMsg(resp.ErrInvalidParam,
+			fmt.Sprintf("关键词长度需在 %d~%d 字之间", minKeywordRunes, maxKeywordRunes))
+	}
+	return kw, nil
+}
+
+// withSenders 批量补发送者信息并把消息转成 DTO，顺序与入参一致。
+//
+// 历史列表与关键词检索共用这一段：逐条查用户会让一页 50 条消息变成 51 次查询，
+// 而发送者去重后通常只有个位数。抽出来也是为了让「哪条读路径忘了补用户信息」
+// 这种漏改只可能发生在一个地方。
+func (s *MessageService) withSenders(ctx context.Context, list []model.Message) ([]MessageDTO, error) {
 	out := make([]MessageDTO, 0, len(list))
-	// 批量补发送者信息，避免每条消息一次查询
+	if len(list) == 0 {
+		return out, nil
+	}
 	uidSet := make(map[int64]struct{}, len(list))
 	for i := range list {
 		uidSet[list[i].FromID] = struct{}{}
@@ -497,7 +574,7 @@ func (s *MessageService) History(ctx context.Context, uid int64, convID string, 
 	if err != nil {
 		return nil, err
 	}
-	for i := len(list) - 1; i >= 0; i-- {
+	for i := range list {
 		u := users[list[i].FromID]
 		out = append(out, *toDTO(&list[i], &u))
 	}
