@@ -9,7 +9,6 @@ import (
 	"net/http/pprof"
 	"runtime"
 	"strconv"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -26,17 +25,23 @@ type Router struct {
 	cfg     *config.Config
 	svc     *service.Services
 	jwt     *jwt.Manager
-	cache   *cache.Cache
 	hub     *ws.Hub
 	wsH     *ws.Handler
 	log     *slog.Logger
 	limiter *middleware.Limiter
+	// probes 是 /healthz 要探测的外部依赖，名字直接作为响应字段名。
+	// 用一张表而不是几个固定字段：以后多一个依赖只改装配处，healthz 不用动。
+	probes map[string]Prober
 }
 
 // NewRouter 创建路由。
 func NewRouter(cfg *config.Config, svc *service.Services, jwtMgr *jwt.Manager,
-	c *cache.Cache, hub *ws.Hub, wsH *ws.Handler, limiter *middleware.Limiter, log *slog.Logger) *gin.Engine {
-	r := &Router{cfg: cfg, svc: svc, jwt: jwtMgr, cache: c, hub: hub, wsH: wsH, log: log, limiter: limiter}
+	c *cache.Cache, hub *ws.Hub, wsH *ws.Handler, limiter *middleware.Limiter,
+	probes map[string]Prober, log *slog.Logger) *gin.Engine {
+	r := &Router{
+		cfg: cfg, svc: svc, jwt: jwtMgr, hub: hub, wsH: wsH,
+		log: log, limiter: limiter, probes: probes,
+	}
 
 	gin.SetMode(gin.ReleaseMode)
 	if cfg.Server.Mode == "debug" {
@@ -195,21 +200,6 @@ func (r *Router) ruleUpload() middleware.Rule {
 func (r *Router) ruleWSHandshake() middleware.Rule {
 	rl := r.cfg.RateLimit
 	return middleware.Rule{Name: "ws", QPS: rl.WSHandshakeQPS, Burst: rl.WSHandshakeBurst}
-}
-
-// healthz 供负载均衡探活，只做轻量判断。
-func (r *Router) healthz(c *gin.Context) {
-	ctx := c.Request.Context()
-	status := "ok"
-	if err := r.cache.Client().Ping(ctx).Err(); err != nil {
-		status = "redis_unavailable"
-	}
-	c.JSON(http.StatusOK, gin.H{
-		"status":    status,
-		"online":    r.hub.OnlineCount(),
-		"goroutine": runtime.NumGoroutine(),
-		"time":      time.Now().Format(time.RFC3339),
-	})
 }
 
 // metrics 输出 Prometheus 文本格式的核心指标，无需引入额外依赖。

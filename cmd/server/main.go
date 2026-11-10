@@ -56,6 +56,11 @@ func run(configPath string, nodeID int64) error {
 	if err != nil {
 		return err
 	}
+	// 探活直接打连接池：gorm 的 *gorm.DB 没有 Ping，且接口层不该为此依赖 ORM。
+	sqlDB, err := db.DB()
+	if err != nil {
+		return fmt.Errorf("获取 MySQL 连接池: %w", err)
+	}
 	if cfg.MySQL.AutoMigrate {
 		if err := infra.Migrate(db); err != nil {
 			return err
@@ -125,7 +130,13 @@ func run(configPath string, nodeID int64) error {
 	limiter.StartCleanup(5*time.Minute, 10*time.Minute)
 
 	wsHandler := ws.NewHandler(hub, jwtMgr, svc, store, cfg.RateLimit, log)
-	engine := handler.NewRouter(cfg, svc, jwtMgr, store, hub, wsHandler, limiter, log)
+	// 探活目标在这里装配（而不是塞成 NewRouter 的固定参数）：加一个依赖只加一行，
+	// healthz 的签名与实现都不用动。
+	probes := map[string]handler.Prober{
+		"mysql": handler.NewSQLProbe(sqlDB),
+		"redis": handler.NewRedisProbe(store),
+	}
+	engine := handler.NewRouter(cfg, svc, jwtMgr, store, hub, wsHandler, limiter, probes, log)
 	engine.SetTrustedProxies(nil)
 
 	server := &http.Server{

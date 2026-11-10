@@ -352,7 +352,9 @@ go tool pprof http://127.0.0.1:8080/debug/pprof/profile?seconds=30
 ## 九、可用性措施
 
 - **优雅停机**：先 `server.Shutdown` 停止新请求 → 断开所有 WS → 停止消费 → 关闭连接。
-- **健康检查** `/healthz` 探测 Redis 连通性，供负载均衡摘除。
+- **健康检查** `/healthz` 并发探测 MySQL 与 Redis（各 1s 超时），任一不可用即
+  `status=degraded`，但 HTTP 仍返回 200 —— 是否摘机由负载均衡按 `status` 判断，
+  避免依赖抖动引发摘除/加回的风暴。
 - **超时全覆盖**：`http.Server` 的 ReadHeader/Read/Write/Idle 全设，请求级 context 超时，
   MQ 消费与 Redis 操作都有独立超时。
 - **panic 兜底**：中间件捕获并转 500，进程不退出。

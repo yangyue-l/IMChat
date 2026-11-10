@@ -147,7 +147,7 @@ handler 交给 `resp.Fail`，中间件用 `resp.Abort`。本文说明每个码�
 | WebSocket 上行帧失败 | `{"type":"error","data":{"msg":"..."}}` | **只有 `msg`，没有 `code`**，无法按码分流，只能展示文案；文案直接来自 service 层 |
 | WebSocket 被踢 | Close 帧 `4001`，reason `kicked` | 被顶号或主动踢线，按「已退出登录」处理，不要当网络异常无限重连 |
 | WebSocket 上行超频 | `error` 帧「发送过于频繁」 | 只丢这一帧，连接保持 |
-| `/healthz` | 恒 200 + `status` 字段 | 探活专用，`redis_unavailable` 表示 Redis 不可用，不是业务接口 |
+| `/healthz` | 恒 200 + `status` 字段 | 探活专用，不是业务接口。`status` 为 `ok` / `degraded`，逐项结果见 `mysql`、`redis` 字段（`ok` / `down`）；降级时不改 HTTP 状态码，也不回显错误详情 |
 | `/metrics` | 纯文本（Prometheus 格式） | 非 JSON |
 
 WS 上行没有业务码是当前的已知限制：单连接限流、参数错误、业务校验失败
