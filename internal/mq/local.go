@@ -16,6 +16,9 @@ import (
 // Handler 处理一类事件。
 type Handler func(ctx context.Context, data json.RawMessage) error
 
+// errBusClosed 表示总线已停止消费。调用方据此判断事件是否真的投出去了。
+var errBusClosed = errors.New("本地总线已关闭")
+
 // Registry 维护事件类型到处理函数的映射，并发安全。
 type Registry struct {
 	mu       sync.RWMutex
@@ -83,22 +86,35 @@ func NewLocalBus(registry *Registry, size int, log *slog.Logger) *LocalBus {
 }
 
 // Publish 非阻塞投递，队列满时丢弃并计数，避免拖慢业务主流程。
+//
+// 关闭判定与入队必须在同一把锁内完成。只查一次然后投递会留下窗口：判定时还没关，
+// 投递时消费协程已经退出，事件躺在缓冲区里没人处理，调用方却收到 nil。
+// 同理，单个 select 里同时摆 `b.ch <- evt` 与 `<-b.closed` 也不够——两者都就绪时
+// Go 随机挑一个，关闭后仍有一半概率"投递成功"，得靠容量填满才稳定报错。
 func (b *LocalBus) Publish(_ context.Context, evt service.Event) error {
+	b.mu.Lock()
+	select {
+	case <-b.closed:
+		b.mu.Unlock()
+		return errBusClosed
+	default:
+	}
+	// 发送本身带 default，持锁不会等待消费者；锁只在投递与关闭之间竞争。
 	select {
 	case b.ch <- evt:
-		return nil
-	case <-b.closed:
-		return errors.New("本地总线已关闭")
-	default:
-		b.mu.Lock()
-		b.dropped++
-		dropped := b.dropped
 		b.mu.Unlock()
-		if dropped%100 == 1 {
-			b.log.Warn("本地事件队列已满，事件被丢弃", "type", evt.Type, "dropped_total", dropped)
-		}
 		return nil
+	default:
 	}
+	b.dropped++
+	dropped := b.dropped
+	b.mu.Unlock()
+
+	// 日志放锁外：slog 要落盘，放在锁内会把所有投递路径串成一条。
+	if dropped%100 == 1 {
+		b.log.Warn("本地事件队列已满，事件被丢弃", "type", evt.Type, "dropped_total", dropped)
+	}
+	return nil
 }
 
 // Start 启动消费循环。并发度由 worker 数决定，本地总线默认 1 个，保证顺序。
@@ -128,6 +144,11 @@ func (b *LocalBus) Start(workers int) {
 
 // Close 停止消费并等待退出。
 func (b *LocalBus) Close() {
-	b.once.Do(func() { close(b.closed) })
+	// 关 channel 也在同一把锁内：Publish 侧靠它保证「判完到投递」之间不会被关。
+	b.once.Do(func() {
+		b.mu.Lock()
+		close(b.closed)
+		b.mu.Unlock()
+	})
 	b.wg.Wait()
 }
