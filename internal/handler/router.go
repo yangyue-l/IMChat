@@ -211,6 +211,7 @@ func (r *Router) metrics(c *gin.Context) {
 	writeMetric(c, "imchat_online_connections", "当前在线连接数", float64(r.hub.OnlineCount()))
 	writeMetric(c, "imchat_frames_received_total", "累计接收的上行帧数", float64(r.hub.RecvFrames()))
 	writeMetric(c, "imchat_frames_sent_total", "累计写出的下行帧数", float64(r.hub.SentFrames()))
+	writeMetric(c, "imchat_frames_dropped_total", "累计因发送队列满丢弃的下行帧数", float64(r.hub.DroppedFrames()))
 	writeMetric(c, "imchat_goroutines", "goroutine 数量", float64(runtime.NumGoroutine()))
 	writeMetric(c, "imchat_heap_alloc_bytes", "堆内存占用", float64(m.HeapAlloc))
 	writeMetric(c, "imchat_gc_count_total", "GC 次数", float64(m.NumGC))

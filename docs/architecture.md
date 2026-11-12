@@ -329,7 +329,7 @@ Redis 与 MySQL 无法同事务，只能选一个方向保证：
 
 ```bash
 go run ./cmd/smoke -base http://127.0.0.1:8080          # 功能回归（45 项）
-curl http://127.0.0.1:8080/metrics                      # 在线连接、上下行帧数、goroutine、堆内存
+curl http://127.0.0.1:8080/metrics                      # 在线连接、收发/丢弃帧数、goroutine、堆内存
 go tool pprof http://127.0.0.1:8080/debug/pprof/profile?seconds=30
 ```
 
@@ -358,4 +358,8 @@ go tool pprof http://127.0.0.1:8080/debug/pprof/profile?seconds=30
 - **超时全覆盖**：`http.Server` 的 ReadHeader/Read/Write/Idle 全设，请求级 context 超时，
   MQ 消费与 Redis 操作都有独立超时。
 - **panic 兜底**：中间件捕获并转 500，进程不退出。
+- **慢连接保护**：单连接发送队列满即断开该连接，并计入 `imchat_frames_dropped_total`。
+  丢弃只记「队列满」一种：触发丢弃的同时就关连接，所以每条连接最多贡献 1 次，
+  这个值等价于「被判定为慢客户端而断开的连接数」。正常下线（关停、踢线）不计入，
+  否则每次重启都会在指标上留下一串假的丢弃。
 - **日志**：结构化 `slog`，release 模式输出 JSON；SQL 慢查询阈值 200ms。

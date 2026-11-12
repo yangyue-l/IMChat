@@ -184,6 +184,10 @@ type Hub struct {
 	// 无法判断积压是在读侧还是写侧（比如广播量大但客户端读得慢）。
 	recvFrames atomic.Int64
 	sentFrames atomic.Int64
+	// 因发送队列满而被丢弃的下行帧数。计数器挂在 Hub 而不是 Client 上：
+	// 队列满的处置就是「断开这条连接」，观测数据若跟着连接一起消失，
+	// 等运维发现推送异常时已经查不到是哪条连接拖慢的。
+	droppedFrames atomic.Int64
 }
 
 // NewHub 创建连接中心。shards 必须为 2 的幂，便于用位运算取模。
@@ -460,6 +464,14 @@ func (h *Hub) RecvFrames() int64 { return h.recvFrames.Load() }
 
 // SentFrames 返回已成功写出的下行帧计数，用于监控推送吞吐。
 func (h *Hub) SentFrames() int64 { return h.sentFrames.Load() }
+
+// DroppedFrames 返回因发送队列满而被丢弃的下行帧数。
+//
+// 口径只覆盖「队列满」这一种丢弃：触发丢弃的同时就会关掉这条连接，
+// 所以单条连接最多贡献 1 次，该值实际等于「被判定为慢客户端而断开的连接数」。
+// 连接已关闭后才进入 trySend 的帧（writeLoop 早已退出）不计入，
+// 那是关闭竞态残留，与推送压力无关，混进来会让这个指标失去指示意义。
+func (h *Hub) DroppedFrames() int64 { return h.droppedFrames.Load() }
 
 // publishBus 把广播消息投入队列。队列满时退化为同步发送，宁可多等一次 RTT 也不丢广播。
 func (h *Hub) publishBus(uids []int64, payload []byte) {

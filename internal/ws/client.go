@@ -145,7 +145,11 @@ func (c *Client) trySend(payload []byte) bool {
 	case <-c.closed:
 		return false
 	default:
-		c.log.Warn("发送队列已满，断开慢连接", "buffer", cap(c.send))
+		// 只有「队列满」才计入丢弃：关闭分支是正常下线，算进指标会让
+		// 每次停服、每次踢线都变成一次「丢弃」，指标立刻失去指示意义。
+		// 这里紧接着 Close()，同一条连接最多记一次，日志量由连接数决定而非帧数。
+		dropped := c.hub.droppedFrames.Add(1)
+		c.log.Warn("发送队列已满，断开慢连接", "buffer", cap(c.send), "dropped_total", dropped)
 		c.Close()
 		return false
 	}
