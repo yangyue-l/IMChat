@@ -94,6 +94,8 @@ IMChat/
 └── docs/                  # 设计与接口文档
     ├── architecture.md    # 架构与关键取舍
     ├── data-model.md      # 数据模型字段与索引清单
+    ├── deploy.md          # 配置项总表、环境变量与多节点部署要点
+    ├── error-codes.md     # 业务错误码与客户端分流口径
     └── api.md             # 接口说明
 ```
 
@@ -185,10 +187,15 @@ IMChat/
 | `IMCHAT_SERVER_ADDR` | `server.addr` |
 | `IMCHAT_MYSQL_DSN` | `mysql.dsn` |
 | `IMCHAT_REDIS_ADDR` | `redis.addr` |
+| `IMCHAT_REDIS_PASSWORD` | `redis.password` |
 | `IMCHAT_RABBITMQ_URL` | `rabbitmq.url` |
 | `IMCHAT_JWT_SECRET` | `jwt.secret` |
+| `IMCHAT_UPLOAD_PUBLIC_BASE` | `upload.public_base` |
 
-生产环境务必修改 `jwt.secret`（至少 16 位）。
+只有字符串项能被环境变量覆盖，数字、布尔、时长只能改配置文件。
+完整配置项（默认值、取值范围）、多节点部署要点与优雅停机顺序见 `docs/deploy.md`。
+
+生产环境务必修改 `jwt.secret`（至少 16 位），多节点部署时各节点必须一致。
 
 ---
 
