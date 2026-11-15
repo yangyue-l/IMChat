@@ -58,6 +58,12 @@ jwt:
 // 「shards 为 0」「window 为 0」这类分支就永远测不到。
 func baseConfig() *Config {
 	return &Config{
+		Server: ServerConfig{
+			Addr:           ":8080",
+			WSPingInterval: Duration(30 * time.Second),
+			WSPongWait:     Duration(75 * time.Second),
+			WSWriteWait:    Duration(10 * time.Second),
+		},
 		MySQL:    MySQLConfig{DSN: "root:pwd@tcp(127.0.0.1:3306)/imchat"},
 		Redis:    RedisConfig{Addr: "127.0.0.1:6379"},
 		JWT:      JWTConfig{Secret: "0123456789abcdef"},
@@ -71,6 +77,7 @@ func baseConfig() *Config {
 			AuthLimit:   20,
 			AuthWindow:  Duration(time.Minute),
 		},
+		Upload:  UploadConfig{MaxSizeMB: 10},
 		Message: MessageConfig{RecallWindow: Duration(2 * time.Minute)},
 	}
 }
@@ -342,6 +349,44 @@ func TestLoadErrors(t *testing.T) {
 	}
 }
 
+// TestValidateErrorCarriesCurrentValue 锁住「每条报错都要带出当前值」。
+//
+// 只写「pong_wait 必须大于 ping 间隔」时，运维还得回头翻配置才知道是改前者还是后者；
+// 带出两边值的报错才能直接定位到该改哪一行。
+func TestValidateErrorCarriesCurrentValue(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*Config)
+		want   []string // 报错里必须同时出现的片段
+	}{
+		{"pong_wait 带出两边值", func(c *Config) {
+			c.Server.WSPingInterval = Duration(30 * time.Second)
+			c.Server.WSPongWait = Duration(10 * time.Second)
+		}, []string{"10s", "30s"}},
+		{"write_wait 带出当前值", func(c *Config) {
+			c.Server.WSWriteWait = 0
+		}, []string{"0s"}},
+		{"max_size_mb 带出范围与当前值", func(c *Config) {
+			c.Upload.MaxSizeMB = 200
+		}, []string{"1~100", "200"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := baseConfig()
+			c.mutate(cfg)
+			err := cfg.validate()
+			if err == nil {
+				t.Fatal("期望报错，实际通过")
+			}
+			for _, w := range c.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Fatalf("报错信息应包含 %q，实际 %v", w, err)
+				}
+			}
+		})
+	}
+}
+
 // TestValidate 逐条覆盖 validate 的拦截分支。
 //
 // 直接调用 validate 而不是 Load：applyDefaults 会把 0 值填成默认值，
@@ -359,6 +404,22 @@ func TestValidate(t *testing.T) {
 		{"secret 15 位", func(c *Config) { c.JWT.Secret = "0123456789abcde" }, "jwt.secret"},
 		{"secret 恰好 16 位通过", func(c *Config) { c.JWT.Secret = "0123456789abcdef" }, ""},
 
+		{"server.addr 为空", func(c *Config) { c.Server.Addr = "" }, "server.addr"},
+		// 读截止时间等于 ping 间隔时，第一条 Ping 与读超时同时到，连接几乎必然被判死
+		{"ws_pong_wait 等于 ping 间隔", func(c *Config) {
+			c.Server.WSPongWait = c.Server.WSPingInterval
+		}, "ws_pong_wait"},
+		{"ws_pong_wait 小于 ping 间隔", func(c *Config) {
+			c.Server.WSPongWait = Duration(5 * time.Second)
+		}, "ws_pong_wait"},
+		{"ws_pong_wait 略大于 ping 间隔通过", func(c *Config) {
+			c.Server.WSPongWait = Duration(31 * time.Second)
+		}, ""},
+		{"ws_write_wait 为 0", func(c *Config) { c.Server.WSWriteWait = 0 }, "ws_write_wait"},
+		{"ws_write_wait 负数", func(c *Config) {
+			c.Server.WSWriteWait = Duration(-time.Second)
+		}, "ws_write_wait"},
+
 		{"shards 为 0", func(c *Config) { c.Cluster.Shards = 0 }, "cluster.shards"},
 		{"shards 为 1 通过", func(c *Config) { c.Cluster.Shards = 1 }, ""},
 		{"shards 非 2 的幂", func(c *Config) { c.Cluster.Shards = 48 }, "cluster.shards"},
@@ -367,8 +428,7 @@ func TestValidate(t *testing.T) {
 		{"consumer_workers 负数", func(c *Config) { c.RabbitMQ.ConsumerWorkers = -1 }, "consumer_workers"},
 		{"consumer_workers 超上限", func(c *Config) { c.RabbitMQ.ConsumerWorkers = 33 }, "consumer_workers"},
 		{"consumer_workers 上限 32 通过", func(c *Config) { c.RabbitMQ.ConsumerWorkers = 32 }, ""},
-		// 0 被当作「没填」放过，交给 applyDefaults 归一成 3。
-		// 报错文案写的是「取值 1~32」，与这里的实际放行范围差一个 0，属已知文案瑕疵。
+		// 0 被当作「没填」放过，交给 applyDefaults 归一成 3（报错文案已按 0~32 写）
 		{"consumer_workers 为 0 视为未填", func(c *Config) { c.RabbitMQ.ConsumerWorkers = 0 }, ""},
 
 		{"distributed 缺 write window", func(c *Config) { c.RateLimit.WriteWindow = 0 }, "write"},
@@ -386,6 +446,12 @@ func TestValidate(t *testing.T) {
 			c.RateLimit.Enabled = false
 			c.RateLimit.WriteWindow = 0
 		}, ""},
+
+		{"upload.max_size_mb 为 0", func(c *Config) { c.Upload.MaxSizeMB = 0 }, "upload.max_size_mb"},
+		{"upload.max_size_mb 负数", func(c *Config) { c.Upload.MaxSizeMB = -1 }, "upload.max_size_mb"},
+		{"upload.max_size_mb 下界 1 通过", func(c *Config) { c.Upload.MaxSizeMB = 1 }, ""},
+		{"upload.max_size_mb 上界 100 通过", func(c *Config) { c.Upload.MaxSizeMB = 100 }, ""},
+		{"upload.max_size_mb 超上限", func(c *Config) { c.Upload.MaxSizeMB = 101 }, "upload.max_size_mb"},
 
 		{"recall_window 负数", func(c *Config) { c.Message.RecallWindow = Duration(-time.Second) }, "message.recall_window"},
 		{"recall_window 为 0 交给默认值", func(c *Config) { c.Message.RecallWindow = 0 }, ""},

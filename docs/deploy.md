@@ -66,13 +66,13 @@ mysql -h127.0.0.1 -P13306 -uroot -p imchat < deploy/migrate/20261024-index-refac
 
 | 配置项 | 默认值 | 取值范围 | 说明 |
 |---|---|---|---|
-| `addr` | `:8080` | 合法监听地址 | HTTP 与 WebSocket 共用同一个端口 |
+| `addr` | `:8080` | 非空，合法监听地址 | HTTP 与 WebSocket 共用同一个端口 |
 | `mode` | `debug` | `debug` / `release` | `debug` 开 gin 调试输出；`release` 时日志走 JSON |
 | `read_timeout` | `15s` | 正时长 | `http.Server.ReadTimeout` |
 | `write_timeout` | `15s` | 正时长 | `http.Server.WriteTimeout`，**同时**用作请求级 context 超时 |
 | `ws_ping_interval` | `30s` | 正时长 | 服务端心跳间隔 |
-| `ws_pong_wait` | `75s` | 正时长，需大于 ping 间隔 | 读超时，漏收 Pong 超过它即判连接死亡 |
-| `ws_write_wait` | `10s` | 正时长 | 单帧写超时 |
+| `ws_pong_wait` | `75s` | 正时长，**必须大于** `ws_ping_interval` | 读超时，漏收 Pong 超过它即判连接死亡；配成小于等于心跳间隔会让连接建好即被判死，启动期直接报错 |
+| `ws_write_wait` | `10s` | 正时长（> 0） | 单帧写超时，为 0 时每一帧（含心跳）都立刻超时 |
 | `ws_send_buffer` | `512` | 正整数 | 单连接发送队列长度，满即断开该连接 |
 | `graceful_timeout` | `15s` | 正时长 | 停机总预算，见第六节 |
 | `pprof` | `false` | 布尔 | 打开才挂载 `/debug/pprof` |
@@ -151,7 +151,7 @@ mysql -h127.0.0.1 -P13306 -uroot -p imchat < deploy/migrate/20261024-index-refac
 | `jwt.expire` | `168h` | 正时长 | 令牌有效期 |
 | `jwt.issuer` | `imchat` | 非空字符串 | 签发者，解析时校验 |
 | `upload.dir` | `./uploads` | 可写目录 | 本地存储目录，同时也是 `/uploads` 静态路由的根 |
-| `upload.max_size_mb` | `10` | 正整数 | 单文件上限 |
+| `upload.max_size_mb` | `10` | `1`~`100` | 单文件上限。负数会被标准库当成 0 而上传播失败，过大则单请求就吃掉磁盘与带宽 |
 | `upload.public_base` | 空 | 字符串 | 对外访问前缀，留空返回相对路径 |
 | `message.recall_window` | `2m` | 非负时长 | 撤回自己的消息的时间窗，负数启动即报错 |
 
@@ -272,12 +272,16 @@ mysql -h127.0.0.1 -P13306 -uroot -p imchat < deploy/migrate/20261024-index-refac
 | `mysql.dsn 不能为空` | 配置与环境变量都没给 | 填 `mysql.dsn` 或注入 `IMCHAT_MYSQL_DSN` |
 | `redis.addr 不能为空` | 同上 | 填 `redis.addr` 或注入 `IMCHAT_REDIS_ADDR` |
 | `jwt.secret 长度至少 16 位` | 用了过短的密钥 | 换 32 位以上随机串，多节点保持一致 |
+| `server.addr 不能为空` | 绕过默认值构造出的空地址（`applyDefaults` 会填 `:8080`） | 填 `:8080` 或注入 `IMCHAT_SERVER_ADDR` |
+| `server.ws_pong_wait(10s) 必须大于 ws_ping_interval(30s)` | 读超时配得不比心跳间隔长，第一条 Ping 还没发读截止就到了 | 保证前者大于后者，默认 `75s` / `30s` |
+| `server.ws_write_wait 必须为正数，当前 0s` | 写截止时间等于「现在」，每一帧都立刻超时 | 填正时长，按网络状况取 `5s`~`10s` |
 | `cluster.shards 必须是 2 的幂，当前 N` | 写了 48、100 这类值 | 改成 32 / 64 / 128 |
-| `rabbitmq.consumer_workers 取值 1~32，当前 N` | 每个 worker 独占一条 channel，配几百个会打爆 broker | 按 CPU 与消息量取 3~8 |
+| `rabbitmq.consumer_workers 取值 0~32（0 表示未填，默认 3），当前 N` | 每个 worker 独占一条 channel，配几百个会打爆 broker | 按 CPU 与消息量取 3~8 |
 | `ratelimit 启用 distributed 时 write 的 limit/window 必须为正数` | 开了 `distributed` 却把窗口或配额留成 0 | 两对 `limit`/`window` 都要填正数 |
+| `upload.max_size_mb 取值 1~100，当前 N` | 负数会被 `http.MaxBytesReader` 当成 0 上限，所有上传都失败 | 按图片场景取 `5`~`20` |
 | `message.recall_window 不能为负数，当前 …` | 笔误（`-2m`） | 改为正时长 |
 | `配置时长 "30" 非法` | 时长漏了单位 | 写 `30s` / `1m` / `1h` |
 | `初始化雪花节点失败` | `-node` 超出 `0~1023` | 改到合法区间，并保证集群内唯一 |
 
-`consumer_workers` 的报错文案写「取值 1~32」，但实现上 `0` 会被当作未填、归一成默认的 3，
-只有负数与大于 32 才会被拦下。
+`consumer_workers` 的 `0` 表示「没填」，由 `applyDefaults` 归一成默认的 3，
+只有负数与大于 32 才会被拦下 —— 报错文案按这个真实范围写。

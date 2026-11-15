@@ -12,6 +12,10 @@ import (
 // Duration 让 yaml 支持 "30s" / "1h" 这类时长写法。
 type Duration time.Duration
 
+// maxUploadSizeMB 是单文件上限的封顶值。图片场景没有上百 MB 的正当需求，
+// 而单请求的大小直接等于一次要落盘的字节数，放任配置等于放任磁盘被打满。
+const maxUploadSizeMB = 100
+
 // maxConsumerWorkers 是消费并发度上限：每个 worker 一个独立 channel，
 // 超过这个量级基本是配置写错了，而不是真的需要这么多消费者。
 const maxConsumerWorkers = 32
@@ -368,12 +372,31 @@ func (c *Config) validate() error {
 	if len(c.JWT.Secret) < 16 {
 		return fmt.Errorf("jwt.secret 长度至少 16 位")
 	}
+	// 监听地址为空时 http.Server 会退化成默认的 ":http"（80 端口）而不是报错，
+	// 等到端口被占用或权限不足才发现配错。applyDefaults 已兜过空值，
+	// 这里挡的是绕过默认值手工构造的配置。
+	if c.Server.Addr == "" {
+		return fmt.Errorf("server.addr 不能为空")
+	}
+	// 读截止时间靠 Pong 续期，而 Pong 是对 Ping 的应答。pong_wait 不大于 ping 间隔时，
+	// 第一条 Ping 都还没发出去，读截止时间就先到了，所有连接建好即被判死
+	// （现象是客户端连上就断、服务端只有一条读超时，看不出与配置有关）。
+	if c.Server.WSPongWait.Get() <= c.Server.WSPingInterval.Get() {
+		return fmt.Errorf("server.ws_pong_wait(%s) 必须大于 ws_ping_interval(%s)",
+			c.Server.WSPongWait.Get(), c.Server.WSPingInterval.Get())
+	}
+	// 写截止时间是 now + write_wait：为 0 或负数时每一帧（含心跳）都立刻超时，
+	// 表现为连接刚建就被关掉。
+	if c.Server.WSWriteWait.Get() <= 0 {
+		return fmt.Errorf("server.ws_write_wait 必须为正数，当前 %s", c.Server.WSWriteWait.Get())
+	}
 	if c.Cluster.Shards <= 0 || c.Cluster.Shards&(c.Cluster.Shards-1) != 0 {
 		return fmt.Errorf("cluster.shards 必须是 2 的幂，当前 %d", c.Cluster.Shards)
 	}
-	// 每个 worker 独占一个 channel，配成几百个会直接打爆 broker 的连接与内存
+	// 每个 worker 独占一个 channel，配成几百个会直接打爆 broker 的连接与内存。
+	// 0 在这里表示「没填」，由 applyDefaults 归一成默认值，报错文案按这个真实范围写。
 	if c.RabbitMQ.ConsumerWorkers < 0 || c.RabbitMQ.ConsumerWorkers > maxConsumerWorkers {
-		return fmt.Errorf("rabbitmq.consumer_workers 取值 1~%d，当前 %d",
+		return fmt.Errorf("rabbitmq.consumer_workers 取值 0~%d（0 表示未填，默认 3），当前 %d",
 			maxConsumerWorkers, c.RabbitMQ.ConsumerWorkers)
 	}
 	// 滑动窗口少了窗口长度就等于没有配额，配置漏填要在启动期就报出来，
@@ -391,6 +414,12 @@ func (c *Config) validate() error {
 				return fmt.Errorf("ratelimit 启用 distributed 时 %s 的 limit/window 必须为正数", r.name)
 			}
 		}
+	}
+	// 上传上限会直接变成 http.MaxBytesReader 的 n：负数被标准库当成 0，
+	// 于是每一次上传都失败，而报错文案还是「不能超过 -1MB」；上百 MB 则单请求
+	// 就要把整个文件读一遍再落盘，等于把磁盘与带宽交给一个配置笔误。
+	if c.Upload.MaxSizeMB < 1 || c.Upload.MaxSizeMB > maxUploadSizeMB {
+		return fmt.Errorf("upload.max_size_mb 取值 1~%d，当前 %d", maxUploadSizeMB, c.Upload.MaxSizeMB)
 	}
 	// 撤回窗口写成负数等于「永远不许撤回」，多半是配置笔误，启动期就拦下来
 	if c.Message.RecallWindow < 0 {
