@@ -1,0 +1,14 @@
+# 换行策略。此前仓库没有这份文件，Windows 上 core.autocrlf=true 会让
+# checkout / git restore 把 Go 文件写成 CRLF，`gofmt -l` 随即把它们报成
+# 「需要格式化」，而 git diff 为空、blob 与 HEAD 完全一致 —— 排查方向全在
+# 代码上，实际是行尾问题。定成「仓库与工作区都是 LF」，让 gofmt 与编译器
+# 看到的字节始终等于提交进库的字节。
+* text=auto eol=lf
+
+# Windows 批处理反过来：LF 结尾的 .bat/.cmd 常被 cmd 解析出错，必须 CRLF。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制格式禁止任何换行转换，否则文件损坏（go:embed 的内容校验也会跟着变）。
+*.{png,jpg,jpeg,gif,ico,webp} binary
+*.{zip,gz,pdf,woff2,ttf} binary
