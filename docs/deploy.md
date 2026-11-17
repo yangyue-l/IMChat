@@ -247,17 +247,26 @@ mysql -h127.0.0.1 -P13306 -uroot -p imchat < deploy/migrate/20261024-index-refac
 依赖抖动时返回 503 会让 LB 反复摘除/加回，比「降级但仍服务」伤害更大。
 降级原因只写日志，不进响应 —— 该端点不鉴权，驱动错误里常带 DSN、端口、账号。
 
-`/metrics` 指标：
+`/metrics` 指标（`_total` 结尾的累计值声明为 `counter`，其余为 `gauge`）：
 
-| 指标 | 含义 |
-|---|---|
-| `imchat_online_connections` | 本节点当前在线连接数 |
-| `imchat_frames_received_total` | 累计接收的上行帧数 |
-| `imchat_frames_sent_total` | 累计写出的下行帧数 |
-| `imchat_frames_dropped_total` | 因发送队列满而丢弃的帧数（等价于被判为慢客户端而断开的连接数） |
-| `imchat_goroutines` | goroutine 数量 |
-| `imchat_heap_alloc_bytes` | 堆内存占用 |
-| `imchat_gc_count_total` | GC 次数 |
+| 指标 | 类型 | 含义 |
+|---|---|---|
+| `imchat_build_info` | gauge | 构建信息，值恒为 1，版本在 `version` / `commit` / `dirty` 三个标签里 |
+| `imchat_online_connections` | gauge | 本节点当前在线连接数 |
+| `imchat_frames_received_total` | counter | 累计接收的上行帧数 |
+| `imchat_frames_sent_total` | counter | 累计写出的下行帧数 |
+| `imchat_frames_dropped_total` | counter | 因发送队列满而丢弃的帧数（等价于被判为慢客户端而断开的连接数） |
+| `imchat_goroutines` | gauge | goroutine 数量 |
+| `imchat_heap_alloc_bytes` | gauge | 堆内存占用 |
+| `imchat_gc_count_total` | counter | GC 次数 |
+
+`imchat_build_info` 把版本放在标签而不是指标名里，升级不会产生新的时间序列，
+`count by (version) (imchat_build_info)` 就能直接查出「现在在跑的都有哪些版本」，
+滚动发布卡在哪个版本一眼可见。`version` 来自 `git describe --tags --always --dirty`，
+`dirty="true"` 表示打包时工作区还有未提交改动 —— 这种构建不该进生产。
+
+只有 `make build` 会注入版本；`go run` 或 IDE 直接构建拿到的是 `version="dev"`、
+`commit="none"`，看到这两个值就说明二进制不是正式产物。
 
 多节点部署时这些是**单节点**视角的值，监控侧按实例聚合，不要按集群求和后看绝对值。
 

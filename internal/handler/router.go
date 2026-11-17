@@ -9,9 +9,11 @@ import (
 	"net/http/pprof"
 	"runtime"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
+	"imchat/internal/buildinfo"
 	"imchat/internal/cache"
 	"imchat/internal/config"
 	"imchat/internal/middleware"
@@ -202,23 +204,58 @@ func (r *Router) ruleWSHandshake() middleware.Rule {
 	return middleware.Rule{Name: "ws", QPS: rl.WSHandshakeQPS, Burst: rl.WSHandshakeBurst}
 }
 
+// 指标类型按 Prometheus 的命名约定取。累计值必须以 _total 结尾且声明成
+// counter：声明成 gauge 时 rate() / increase() 会把「服务重启后归零」当成
+// 值下降，算出负增量，基于它配的告警阈值全部失真。
+const (
+	metricGauge   = "gauge"
+	metricCounter = "counter"
+)
+
 // metrics 输出 Prometheus 文本格式的核心指标，无需引入额外依赖。
 func (r *Router) metrics(c *gin.Context) {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 
 	c.Header("Content-Type", "text/plain; version=0.0.4")
-	writeMetric(c, "imchat_online_connections", "当前在线连接数", float64(r.hub.OnlineCount()))
-	writeMetric(c, "imchat_frames_received_total", "累计接收的上行帧数", float64(r.hub.RecvFrames()))
-	writeMetric(c, "imchat_frames_sent_total", "累计写出的下行帧数", float64(r.hub.SentFrames()))
-	writeMetric(c, "imchat_frames_dropped_total", "累计因发送队列满丢弃的下行帧数", float64(r.hub.DroppedFrames()))
-	writeMetric(c, "imchat_goroutines", "goroutine 数量", float64(runtime.NumGoroutine()))
-	writeMetric(c, "imchat_heap_alloc_bytes", "堆内存占用", float64(m.HeapAlloc))
-	writeMetric(c, "imchat_gc_count_total", "GC 次数", float64(m.NumGC))
+	writeBuildInfo(c)
+	writeMetric(c, "imchat_online_connections", "当前在线连接数", metricGauge, float64(r.hub.OnlineCount()))
+	writeMetric(c, "imchat_frames_received_total", "累计接收的上行帧数", metricCounter, float64(r.hub.RecvFrames()))
+	writeMetric(c, "imchat_frames_sent_total", "累计写出的下行帧数", metricCounter, float64(r.hub.SentFrames()))
+	writeMetric(c, "imchat_frames_dropped_total", "累计因发送队列满丢弃的下行帧数", metricCounter, float64(r.hub.DroppedFrames()))
+	writeMetric(c, "imchat_goroutines", "goroutine 数量", metricGauge, float64(runtime.NumGoroutine()))
+	writeMetric(c, "imchat_heap_alloc_bytes", "堆内存占用", metricGauge, float64(m.HeapAlloc))
+	writeMetric(c, "imchat_gc_count_total", "GC 次数", metricCounter, float64(m.NumGC))
 }
 
-func writeMetric(c *gin.Context, name, help string, value float64) {
-	c.Writer.WriteString("# HELP " + name + " " + help + "\n")
+// writeBuildInfo 输出版本信息。
+//
+// Info 类指标的惯例是「值恒为 1、信息全放 label」：版本升级只改标签值，
+// 时间序列仍是同一条，`count by (version)` 就能直接查出「现在在跑的都有
+// 哪些版本」。把版本塞进 HELP 或指标名都会让这个聚合失效。
+func writeBuildInfo(c *gin.Context) {
+	const name = "imchat_build_info"
+	c.Writer.WriteString("# HELP " + name + " 构建信息，值恒为 1，版本与提交号见标签\n")
 	c.Writer.WriteString("# TYPE " + name + " gauge\n")
+	c.Writer.WriteString(name +
+		`{version="` + escapeLabel(buildinfo.Version) +
+		`",commit="` + escapeLabel(buildinfo.Commit) +
+		`",dirty="` + strconv.FormatBool(buildinfo.Dirty()) + `"} 1` + "\n")
+}
+
+// escapeLabel 转义标签值里的反斜杠、双引号与换行。
+//
+// version 由 git describe 生成，正常不含这些字符，但一个意外字符就能让整行
+// 变成非法文本、整个 /metrics 抓取失败；指标服务不该被这种输入打挂。
+func escapeLabel(v string) string {
+	if !strings.ContainsAny(v, "\\\"\n") {
+		return v
+	}
+	return strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`).Replace(v)
+}
+
+func writeMetric(c *gin.Context, name, help, typ string, value float64) {
+	c.Writer.WriteString("# HELP " + name + " " + help + "\n")
+	c.Writer.WriteString("# TYPE " + name + " " + typ + "\n")
 	c.Writer.WriteString(name + " " + strconv.FormatFloat(value, 'g', -1, 64) + "\n")
 }

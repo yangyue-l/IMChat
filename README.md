@@ -203,12 +203,16 @@ IMChat/
 
 ```bash
 go run ./cmd/smoke -base http://127.0.0.1:8080   # 功能回归
-curl http://127.0.0.1:8080/metrics               # 在线连接、goroutine、堆内存
+curl http://127.0.0.1:8080/metrics               # 版本、在线连接、帧数、goroutine、堆内存
 go tool pprof http://127.0.0.1:8080/debug/pprof/profile?seconds=30
 ```
 
-建议关注：`imchat_online_connections`、`imchat_goroutines`、GC 次数、
-MySQL 慢查询日志（已开启，阈值 200ms）。
+建议关注：`imchat_online_connections`、`imchat_frames_dropped_total`（慢客户端导致丢帧）、
+`imchat_goroutines`、GC 次数、MySQL 慢查询日志（已开启，阈值 200ms）。
+`imchat_build_info` 的 `version` 标签用来核对线上跑的到底是哪个版本。
+
+构建用 `make build`，它会把 `git describe --tags --always --dirty` 的结果注入二进制；
+`go run` 直接起的是 `version="dev"`，别拿它冒充发布版本。
 
 ---
 
