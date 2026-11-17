@@ -220,3 +220,11 @@ MySQL 慢查询日志（已开启，阈值 200ms）。
 4. **推送网关**：离线通知接入 APNs / FCM / 厂商通道。
 5. **敏感词与内容审核**：接入第三方审核服务，落库前拦截。
 6. **可观测性**：接入 OpenTelemetry，链路追踪补全 MQ 段。
+
+---
+
+## 八、变更日志
+
+按 feat / fix / refactor / perf / test / docs / chore / ci 分组汇总的提交清单见
+[`CHANGELOG.md`](CHANGELOG.md)，每条带短 hash，可直接 `git show` 看正文与影响文件。
+
