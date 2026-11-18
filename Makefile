@@ -1,4 +1,4 @@
-.PHONY: help run build tidy lint fmt test cover up down logs ps
+.PHONY: help run build web web-dev tidy lint fmt test cover up down logs ps
 
 # 版本信息注入。git describe 在有 tag 时给 v0.1.0，tag 之后又有提交给
 # v0.1.0-3-gabc1234，工作区有未提交改动则追加 -dirty。
@@ -12,6 +12,8 @@ help:
 	@echo "make up      启动 MySQL/Redis/RabbitMQ"
 	@echo "make run     启动服务（默认单节点）"
 	@echo "make build   编译到 bin/imchat（注入 git describe 的版本号）"
+	@echo "make web     构建前端到 web/index.html（单文件产物）"
+	@echo "make web-dev 启动前端开发服务器（:5173，代理到 :8080）"
 	@echo "make lint    go vet 静态检查"
 	@echo "make fmt     格式化 ./cmd 与 ./internal"
 	@echo "make test    运行全部单测"
@@ -25,6 +27,14 @@ run:
 
 build:
 	go build -trimpath -ldflags "$(LDFLAGS)" -o bin/imchat ./cmd/server
+
+# 前端源码在 web/app/，构建产物是自包含的 web/index.html。
+# 后端不托管它：产物由 nginx / 静态站点发布，服务只提供 API 与 WebSocket。
+web:
+	cd web && npm install --no-audit --no-fund && npm run build
+
+web-dev:
+	cd web && npm run dev
 
 tidy:
 	go mod tidy
