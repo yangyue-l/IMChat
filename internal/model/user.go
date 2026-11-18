@@ -1,6 +1,10 @@
 package model
 
-import "time"
+import (
+	"time"
+
+	"imchat/internal/media"
+)
 
 // UserStatus 账号状态。
 const (
@@ -46,11 +50,15 @@ type PublicUser struct {
 }
 
 // ToPublic 转换为对外结构。
+//
+// Avatar 在这一层从对象 key 还原成绝对地址：所有出站路径（好友列表、群成员、
+// 消息发送者、点赞/评论者）都经过 ToPublic 或 relation.UserMap，转换只写一次，
+// 不会出现「某个接口忘了拼前缀」而返回裸 key 的情况。
 func (u *User) ToPublic() PublicUser {
 	return PublicUser{
 		ID:        u.ID,
 		Nickname:  u.Nickname,
-		Avatar:    u.Avatar,
+		Avatar:    media.URL(u.Avatar),
 		Gender:    u.Gender,
 		Signature: u.Signature,
 	}

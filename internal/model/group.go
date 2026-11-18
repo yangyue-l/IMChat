@@ -1,6 +1,10 @@
 package model
 
-import "time"
+import (
+	"time"
+
+	"imchat/internal/media"
+)
 
 // 群成员角色。
 const (
@@ -41,6 +45,12 @@ type Group struct {
 
 // TableName 固定表名。
 func (Group) TableName() string { return "groups" }
+
+// AvatarURL 返回可直接访问的群头像地址。
+//
+// 库里存的是对象 key，出站才拼前缀：换 CDN 只改配置，不用回刷 groups.avatar。
+// 与 User.ToPublic 同一口径，群相关的 DTO 都从这里取头像。
+func (g *Group) AvatarURL() string { return media.URL(g.Avatar) }
 
 // GroupMember 群成员。
 type GroupMember struct {
