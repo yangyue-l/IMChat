@@ -16,6 +16,11 @@
 - `b36eb93` 新增登录设备列表与踢线接口 `GET /api/v1/sessions`、`DELETE /api/v1/sessions/:device`
 - `d569e9b` 新增会话内消息关键词检索 `GET /api/v1/messages/search`
 - `860f02e` 新增下行帧丢弃计数，发送队列满时不再静默丢帧
+- `ac97698` 前端拆成 Vue3 + Vite 独立工程，源码在 `web/app`，构建产物仍入库
+- `ac1cb64` 新增 `media` 包：库里存对象 key，出站统一拼访问地址，换 CDN 只改配置
+- `c9111d3` 新增 `storage` 包，图片写入阿里云 OSS，接口只暴露 Put / URL / Delete / Ping
+- `7ba025b` 换头像、删动态、撤回图片时回收旧对象，按 key 里的 uid 判断归属
+- `86c1fea` 上传接口同时回传 key 与 url，并修掉 multipart 上限少留余量的问题
 
 ## fix
 
@@ -54,12 +59,16 @@
 - `bf4d94d` 补 `im:seq` 结构与在线判定的排查说明
 - `dd9f7e5` 新增业务错误码说明，并把 40100 与 40101 拆成两行
 - `f0ba767` 新增部署说明，覆盖配置项总表与多节点要点
+- `9d8a34c` 同步接口、数据模型与部署文档到「库里存 key」的新口径
 
 ## chore
 
 - `c0a96b5` 初始化仓库，把现有工程作为基线导入
 - `0d8a35d` 补 `test` / `cover` / `fmt` 三个 make 目标
 - `2d04f31` 固定换行策略：仓库与工作区统一 LF，`.gitattributes` 落地
+- `f245eda` 注入版本信息并在启动日志与 `/metrics` 输出
+- `0cc15ee` 移除 `scripts/` 下四个无入口的验证脚本
+- `379eca0` 忽略前端依赖与环境变量，删除已废弃的本地图片目录
 
 ## ci
 
