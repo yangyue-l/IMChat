@@ -88,6 +88,7 @@ func run(configPath string, nodeID int64) error {
 		Bucket:          cfg.Upload.OSS.Bucket,
 		AccessKeyID:     cfg.Upload.OSS.AccessKeyID,
 		AccessKeySecret: cfg.Upload.OSS.AccessKeySecret,
+		ObjectACL:       cfg.Upload.OSS.ACL,
 	})
 	if err != nil {
 		return err

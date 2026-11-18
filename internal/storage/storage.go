@@ -52,4 +52,12 @@ type Config struct {
 	Bucket          string
 	AccessKeyID     string
 	AccessKeySecret string
+	// ObjectACL 是写入对象的访问控制：private / public-read /
+	// public-read-write / default，空字符串表示不显式设置，
+	// 让对象跟随桶的默认策略。
+	//
+	// 不是每个桶都需要它：桶本身已开放公共读时留空即可。但桶是私有的、
+	// 又想靠 URL 直读图片时，必须在写对象时带上 public-read，否则上传成功、
+	// 返回的地址却是 403——这个错要在上传那一刻才发现就太晚了。
+	ObjectACL string
 }

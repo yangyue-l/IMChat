@@ -3,7 +3,10 @@ package storage
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
+	"sync"
+	"time"
 
 	aliyun "github.com/aliyun/aliyun-oss-go-sdk/oss"
 
@@ -26,11 +29,33 @@ const (
 	// 不显式声明时按桶/ CDN 的默认策略走，很可能每次都要回源，
 	// 图片流量全部压在桶上。
 	cacheControlImmutable = "public, max-age=31536000, immutable"
+
+	// probeTTL 是探活结果的缓存时长。
+	//
+	// /healthz 由负载均衡每隔几秒拉一次，实例一多，真打桶的请求量就随实例数
+	// 线性放大，而每次 HEAD 都是一个 RTT 加一次签名。缓存几秒能把探活流量
+	// 压成常数级，同时把「桶真的挂了」的发现延迟限制在 probeTTL 以内——
+	// 探活要的是「尽快发现」，不是「每一次都问一遍」。
+	probeTTL = 10 * time.Second
 )
 
 // ossStorage 是阿里云 OSS 实现。
 type ossStorage struct {
 	bucket *aliyun.Bucket
+	// objectACL 为空表示不显式设置，对象 ACL 跟随桶的默认策略。
+	// 桶是私有时必须设 public-read，否则图片地址对外一律 403。
+	objectACL aliyun.ACLType
+	// probeFn 是真打桶的探测。字段化是为了让「ctx 先到」「缓存命中」
+	// 这几条分支能在不联网、不持有 OSS 凭据的前提下测出来。
+	probeFn func() error
+
+	// 探活缓存，见 probeTTL。
+	mu       sync.Mutex
+	probedAt time.Time
+	probeErr error
+	// inflight 非 nil 表示有探测正在跑，close 即完成。
+	// 并发探活只需要等同一个结果，不该让 N 个 /healthz 打出 N 次 HEAD。
+	inflight chan struct{}
 }
 
 // New 构造 OSS 存储。
@@ -59,7 +84,8 @@ func New(cfg Config) (Storage, error) {
 	if err != nil {
 		return nil, fmt.Errorf("storage: 打开 bucket %s 失败: %w", cfg.Bucket, err)
 	}
-	return &ossStorage{bucket: bucket}, nil
+	s := &ossStorage{bucket: bucket, objectACL: aliyun.ACLType(cfg.ObjectACL)}
+	return s, nil
 }
 
 // Put 上传对象，成功后返回公网地址。
@@ -79,7 +105,15 @@ func (s *ossStorage) Put(ctx context.Context, obj Object) (string, error) {
 		// key 内容永不变，长缓存是纯收益，见 cacheControlImmutable。
 		aliyun.CacheControl(cacheControlImmutable),
 	}
-	if err := s.bucket.PutObject(obj.Key, obj.Body, opts...); err != nil {
+	// 留空就不带这个头，让对象继承桶策略：桶本身已开放读时，
+	// 再显式设一遍只是把同一个结论写两处，反而多一个会漂移的地方。
+	if s.objectACL != "" {
+		opts = append(opts, aliyun.ObjectACL(s.objectACL))
+	}
+	// SDK 不接 context，但它会持续读 body：包一层之后，取消后的下一次 Read
+	// 立刻返回错误，上传随之中断，不必等满 SDK 的 60s 读写超时。
+	body := &ctxReader{ctx: ctx, r: obj.Body}
+	if err := s.bucket.PutObject(obj.Key, body, opts...); err != nil {
 		return "", fmt.Errorf("%w: 上传 %s 失败: %w", ErrUnavailable, obj.Key, err)
 	}
 	return s.URL(obj.Key), nil
@@ -118,10 +152,59 @@ func (s *ossStorage) Delete(ctx context.Context, keys ...string) error {
 // 用 HEAD 一个固定不存在的对象，而不是 GetBucketInfo：只授予
 // oss:PutObject / oss:GetObject 的最小权限策略里通常没有 oss:GetBucketInfo，
 // 拿后者探活会把一个健康的部署判成不可用。
+//
+// 调用方只等到自己的 deadline，不跟着 SDK 的「10s 连接 + 60s 读写」一起卡：
+// 探测本身跑在独立 goroutine 里，结果回填缓存供后续调用复用。
 func (s *ossStorage) Ping(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
+	s.mu.Lock()
+	if time.Since(s.probedAt) < probeTTL {
+		err := s.probeErr
+		s.mu.Unlock()
+		return err
+	}
+	wait := s.inflight
+	if wait == nil {
+		wait = make(chan struct{})
+		s.inflight = wait
+		go s.runProbe(wait)
+	}
+	s.mu.Unlock()
+
+	select {
+	case <-wait:
+		s.mu.Lock()
+		err := s.probeErr
+		s.mu.Unlock()
+		return err
+	case <-ctx.Done():
+		// 探测还在飞，结果留给下一个调用方：这里放弃不影响缓存回填。
+		return fmt.Errorf("oss 探活超时: %w", ctx.Err())
+	}
+}
+
+// runProbe 执行一次真实探测，完成后回填缓存并唤醒等待者。
+func (s *ossStorage) runProbe(done chan struct{}) {
+	probe := s.probeFn
+	if probe == nil {
+		probe = s.probe
+	}
+	err := probe()
+
+	s.mu.Lock()
+	s.probedAt = time.Now()
+	s.probeErr = err
+	s.inflight = nil
+	s.mu.Unlock()
+
+	close(done)
+}
+
+// probe 是真打一次桶的探测，失败原因只进错误链，由调用方决定怎么记。
+func (s *ossStorage) probe() error {
 	// false + nil 才算健康：桶可达、凭据有效、对象确实不存在
 	exists, err := s.bucket.IsObjectExist(probeKey)
 	if err != nil {
@@ -132,4 +215,20 @@ func (s *ossStorage) Ping(ctx context.Context) error {
 		return fmt.Errorf("oss 探活失败: 探测对象 %s 意外存在", probeKey)
 	}
 	return nil
+}
+
+// ctxReader 让不接 context 的 SDK 也能感知取消。
+//
+// 每次 Read 前查一次 ctx：ctx.Err() 是一次原子读，开销可以忽略，
+// 而换成「只在边界检查」要额外维护状态，还容易漏掉真正卡住的那次读。
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c *ctxReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
 }
