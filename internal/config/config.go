@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -139,10 +140,29 @@ type JWTConfig struct {
 	Issuer string   `yaml:"issuer"`
 }
 
+// UploadConfig 是图片存储配置。
+//
+// 只有一种介质：阿里云 OSS。图片由后端直传到桶里，对外地址再经 CDN 回源，
+// 后端不再保留本地图片目录，也不再挂载静态资源路由。
 type UploadConfig struct {
-	Dir        string `yaml:"dir"`
-	MaxSizeMB  int    `yaml:"max_size_mb"`
-	PublicBase string `yaml:"public_base"`
+	MaxSizeMB int `yaml:"max_size_mb"`
+	// PublicBase 是图片对外的访问前缀：接了 CDN 就填 CDN 域名，
+	// 没接时留空，按 https://{bucket}.{endpoint} 推导。
+	PublicBase string    `yaml:"public_base"`
+	OSS        OSSConfig `yaml:"oss"`
+}
+
+// OSSConfig 是阿里云对象存储参数。
+//
+// 密钥不放 yaml：这份文件本身在仓库里，凭据一律由
+// IMCHAT_OSS_ACCESS_KEY_ID / IMCHAT_OSS_ACCESS_KEY_SECRET 注入。
+type OSSConfig struct {
+	// Endpoint 是 bucket 所在区域的访问域名，不带 bucket 前缀，
+	// 形如 oss-cn-hangzhou.aliyuncs.com（协议头可省略，缺省按 https）。
+	Endpoint        string `yaml:"endpoint"`
+	Bucket          string `yaml:"bucket"`
+	AccessKeyID     string `yaml:"access_key_id"`
+	AccessKeySecret string `yaml:"access_key_secret"`
 }
 
 // MessageConfig 消息相关业务参数。
@@ -180,6 +200,9 @@ func Load(path string) (*Config, error) {
 
 	cfg.applyDefaults()
 	cfg.applyEnv()
+	// 派生值必须在 applyEnv 之后算：bucket / endpoint 常由环境变量注入，
+	// 放在 applyDefaults 里会拿到空串，拼出一个只有协议头的前缀。
+	cfg.derive()
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -333,9 +356,8 @@ func (c *Config) applyDefaults() {
 		c.JWT.Issuer = "imchat"
 	}
 
-	if c.Upload.Dir == "" {
-		c.Upload.Dir = "./uploads"
-	}
+	// upload.public_base 不在这里给默认值：它依赖 bucket 与 endpoint，
+	// 而那两个字段常常由环境变量注入，留给 derive 在 applyEnv 之后推导。
 	if c.Upload.MaxSizeMB == 0 {
 		c.Upload.MaxSizeMB = 10
 	}
@@ -354,6 +376,35 @@ func (c *Config) applyEnv() {
 	setStr(&c.RabbitMQ.URL, "IMCHAT_RABBITMQ_URL")
 	setStr(&c.JWT.Secret, "IMCHAT_JWT_SECRET")
 	setStr(&c.Upload.PublicBase, "IMCHAT_UPLOAD_PUBLIC_BASE")
+	// OSS 的接入点与凭据全部走环境变量：写进 yaml 等于跟着仓库一起泄露，
+	// 而且换桶、换密钥时不该产生一次配置文件改动。
+	setStr(&c.Upload.OSS.Endpoint, "IMCHAT_OSS_ENDPOINT")
+	setStr(&c.Upload.OSS.Bucket, "IMCHAT_OSS_BUCKET")
+	setStr(&c.Upload.OSS.AccessKeyID, "IMCHAT_OSS_ACCESS_KEY_ID")
+	setStr(&c.Upload.OSS.AccessKeySecret, "IMCHAT_OSS_ACCESS_KEY_SECRET")
+}
+
+// derive 计算依赖其它字段的派生值。
+//
+// 只能在 applyEnv 之后跑：endpoint / bucket 常由环境变量注入，
+// 在默认值阶段推导会拿到空串，拼出一个只有协议头的前缀。
+func (c *Config) derive() {
+	// 图片访问前缀：没配 CDN 时按 OSS 的默认 bucket 域名规则拼
+	// https://{bucket}.{endpoint}。仍然留空说明 endpoint/bucket 也没配，
+	// 交给 validate 报「必填项为空」，不在这里编一个假地址。
+	if c.Upload.PublicBase != "" || c.Upload.OSS.Bucket == "" || c.Upload.OSS.Endpoint == "" {
+		return
+	}
+	c.Upload.PublicBase = "https://" + c.Upload.OSS.Bucket + "." + trimScheme(c.Upload.OSS.Endpoint)
+}
+
+func trimScheme(endpoint string) string {
+	for _, s := range []string{"https://", "http://"} {
+		if strings.HasPrefix(endpoint, s) {
+			return strings.TrimPrefix(endpoint, s)
+		}
+	}
+	return endpoint
 }
 
 func setStr(dst *string, key string) {
@@ -416,10 +467,23 @@ func (c *Config) validate() error {
 		}
 	}
 	// 上传上限会直接变成 http.MaxBytesReader 的 n：负数被标准库当成 0，
-	// 于是每一次上传都失败，而报错文案还是「不能超过 -1MB」；上百 MB 则单请求
-	// 就要把整个文件读一遍再落盘，等于把磁盘与带宽交给一个配置笔误。
+	// 于是每一次上传都失败，而报错文案还是「不能超过 -1MB」；上百 MB 则
+	// 单请求就要把整个文件过一遍内存与带宽，等于把资源交给一个配置笔误。
 	if c.Upload.MaxSizeMB < 1 || c.Upload.MaxSizeMB > maxUploadSizeMB {
 		return fmt.Errorf("upload.max_size_mb 取值 1~%d，当前 %d", maxUploadSizeMB, c.Upload.MaxSizeMB)
+	}
+	// OSS 三件套缺任何一项，服务都照样能启动，直到第一个用户上传才失败，
+	// 而那时前端只看到「文件保存失败」。这类配置错误必须在启动期暴露。
+	if c.Upload.OSS.Endpoint == "" || c.Upload.OSS.Bucket == "" {
+		return fmt.Errorf("upload.oss.endpoint 与 upload.oss.bucket 不能为空")
+	}
+	if c.Upload.OSS.AccessKeyID == "" || c.Upload.OSS.AccessKeySecret == "" {
+		return fmt.Errorf("upload.oss 凭据不能为空，请注入 IMCHAT_OSS_ACCESS_KEY_ID / IMCHAT_OSS_ACCESS_KEY_SECRET")
+	}
+	// 对外前缀必须是绝对地址：写成 "cdn.example.com" 这种裸域名会被前端当成
+	// 当前站点下的相对路径，图片静默全部 404，而接口返回的字段看起来完全正常。
+	if !strings.HasPrefix(c.Upload.PublicBase, "https://") && !strings.HasPrefix(c.Upload.PublicBase, "http://") {
+		return fmt.Errorf("upload.public_base 必须是 http(s):// 开头的绝对地址，当前 %q", c.Upload.PublicBase)
 	}
 	// 撤回窗口写成负数等于「永远不许撤回」，多半是配置笔误，启动期就拦下来
 	if c.Message.RecallWindow < 0 {

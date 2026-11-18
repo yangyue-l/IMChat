@@ -23,6 +23,10 @@ var envKeys = []string{
 	"IMCHAT_RABBITMQ_URL",
 	"IMCHAT_JWT_SECRET",
 	"IMCHAT_UPLOAD_PUBLIC_BASE",
+	"IMCHAT_OSS_ENDPOINT",
+	"IMCHAT_OSS_BUCKET",
+	"IMCHAT_OSS_ACCESS_KEY_ID",
+	"IMCHAT_OSS_ACCESS_KEY_SECRET",
 }
 
 // clearEnv 把 applyEnv 认的变量全部置空（setStr 忽略空串，等价于没设）。
@@ -43,7 +47,10 @@ func writeConfig(t *testing.T, body string) string {
 	return path
 }
 
-// minimalYAML 是能通过 validate 的最小配置：只有三个必填项，其余全交给默认值。
+// minimalYAML 是能通过 validate 的最小配置：必填项写全，其余全交给默认值。
+//
+// OSS 段必须出现：图片只有对象存储一种介质，缺 endpoint/bucket/凭据
+// 在启动期就会被 validate 拦下。这里的 AK/SK 是假值，真实凭据走环境变量。
 const minimalYAML = `
 mysql:
   dsn: "root:pwd@tcp(127.0.0.1:3306)/imchat?charset=utf8mb4&parseTime=True"
@@ -51,6 +58,12 @@ redis:
   addr: "127.0.0.1:6379"
 jwt:
   secret: "0123456789abcdef"
+upload:
+  oss:
+    endpoint: "oss-cn-hangzhou.aliyuncs.com"
+    bucket: "imchat-test"
+    access_key_id: "test-ak"
+    access_key_secret: "test-sk"
 `
 
 // baseConfig 返回一份能通过 validate 的内存配置。
@@ -77,7 +90,16 @@ func baseConfig() *Config {
 			AuthLimit:   20,
 			AuthWindow:  Duration(time.Minute),
 		},
-		Upload:  UploadConfig{MaxSizeMB: 10},
+		Upload: UploadConfig{
+			MaxSizeMB:  10,
+			PublicBase: "https://cdn.example.com",
+			OSS: OSSConfig{
+				Endpoint:        "oss-cn-hangzhou.aliyuncs.com",
+				Bucket:          "imchat-test",
+				AccessKeyID:     "ak",
+				AccessKeySecret: "sk",
+			},
+		},
 		Message: MessageConfig{RecallWindow: Duration(2 * time.Minute)},
 	}
 }
@@ -197,8 +219,10 @@ func TestLoadAppliesDefaults(t *testing.T) {
 		{"jwt.expire", cfg.JWT.Expire.Get(), 168 * time.Hour},
 		{"jwt.issuer", cfg.JWT.Issuer, "imchat"},
 
-		{"upload.dir", cfg.Upload.Dir, "./uploads"},
 		{"upload.max_size_mb", cfg.Upload.MaxSizeMB, 10},
+		// public_base 没配时要按 {bucket}.{endpoint} 推出来，
+		// 否则 storage.New 会拿到空前缀，返回的图片地址全是相对路径。
+		{"upload.public_base 推导", cfg.Upload.PublicBase, "https://imchat-test.oss-cn-hangzhou.aliyuncs.com"},
 
 		{"message.recall_window", cfg.Message.RecallWindow.Get(), 2 * time.Minute},
 	}
@@ -225,6 +249,12 @@ redis:
   addr: "127.0.0.1:6379"
 jwt:
   secret: "0123456789abcdef"
+upload:
+  oss:
+    endpoint: "oss-cn-hangzhou.aliyuncs.com"
+    bucket: "imchat-test"
+    access_key_id: "test-ak"
+    access_key_secret: "test-sk"
 cluster:
   shards: 4
 `
@@ -257,13 +287,17 @@ cluster:
 func TestLoadEnvOverrides(t *testing.T) {
 	clearEnv(t)
 	want := map[string]string{
-		"IMCHAT_SERVER_ADDR":        ":7070",
-		"IMCHAT_MYSQL_DSN":          "env-dsn",
-		"IMCHAT_REDIS_ADDR":         "10.0.0.1:6379",
-		"IMCHAT_REDIS_PASSWORD":     "s3cret",
-		"IMCHAT_RABBITMQ_URL":       "amqp://guest:guest@10.0.0.2:5672/",
-		"IMCHAT_JWT_SECRET":         "0123456789abcdef-env",
-		"IMCHAT_UPLOAD_PUBLIC_BASE": "https://cdn.example.com",
+		"IMCHAT_SERVER_ADDR":           ":7070",
+		"IMCHAT_MYSQL_DSN":             "env-dsn",
+		"IMCHAT_REDIS_ADDR":            "10.0.0.1:6379",
+		"IMCHAT_REDIS_PASSWORD":        "s3cret",
+		"IMCHAT_RABBITMQ_URL":          "amqp://guest:guest@10.0.0.2:5672/",
+		"IMCHAT_JWT_SECRET":            "0123456789abcdef-env",
+		"IMCHAT_UPLOAD_PUBLIC_BASE":    "https://cdn.example.com",
+		"IMCHAT_OSS_ENDPOINT":          "oss-cn-beijing.aliyuncs.com",
+		"IMCHAT_OSS_BUCKET":            "env-bucket",
+		"IMCHAT_OSS_ACCESS_KEY_ID":     "env-ak",
+		"IMCHAT_OSS_ACCESS_KEY_SECRET": "env-sk",
 	}
 	for k, v := range want {
 		t.Setenv(k, v)
@@ -274,13 +308,17 @@ func TestLoadEnvOverrides(t *testing.T) {
 	}
 
 	got := map[string]string{
-		"IMCHAT_SERVER_ADDR":        cfg.Server.Addr,
-		"IMCHAT_MYSQL_DSN":          cfg.MySQL.DSN,
-		"IMCHAT_REDIS_ADDR":         cfg.Redis.Addr,
-		"IMCHAT_REDIS_PASSWORD":     cfg.Redis.Password,
-		"IMCHAT_RABBITMQ_URL":       cfg.RabbitMQ.URL,
-		"IMCHAT_JWT_SECRET":         cfg.JWT.Secret,
-		"IMCHAT_UPLOAD_PUBLIC_BASE": cfg.Upload.PublicBase,
+		"IMCHAT_SERVER_ADDR":           cfg.Server.Addr,
+		"IMCHAT_MYSQL_DSN":             cfg.MySQL.DSN,
+		"IMCHAT_REDIS_ADDR":            cfg.Redis.Addr,
+		"IMCHAT_REDIS_PASSWORD":        cfg.Redis.Password,
+		"IMCHAT_RABBITMQ_URL":          cfg.RabbitMQ.URL,
+		"IMCHAT_JWT_SECRET":            cfg.JWT.Secret,
+		"IMCHAT_UPLOAD_PUBLIC_BASE":    cfg.Upload.PublicBase,
+		"IMCHAT_OSS_ENDPOINT":          cfg.Upload.OSS.Endpoint,
+		"IMCHAT_OSS_BUCKET":            cfg.Upload.OSS.Bucket,
+		"IMCHAT_OSS_ACCESS_KEY_ID":     cfg.Upload.OSS.AccessKeyID,
+		"IMCHAT_OSS_ACCESS_KEY_SECRET": cfg.Upload.OSS.AccessKeySecret,
 	}
 	for k, v := range want {
 		if got[k] != v {
@@ -311,10 +349,20 @@ func TestLoadEnvFillsRequiredField(t *testing.T) {
 	t.Setenv("IMCHAT_MYSQL_DSN", "root:pwd@tcp(db:3306)/imchat")
 	t.Setenv("IMCHAT_REDIS_ADDR", "redis:6379")
 	t.Setenv("IMCHAT_JWT_SECRET", "0123456789abcdef")
+	t.Setenv("IMCHAT_OSS_ENDPOINT", "oss-cn-hangzhou.aliyuncs.com")
+	t.Setenv("IMCHAT_OSS_BUCKET", "imchat")
+	t.Setenv("IMCHAT_OSS_ACCESS_KEY_ID", "ak")
+	t.Setenv("IMCHAT_OSS_ACCESS_KEY_SECRET", "sk")
 
-	// 故意只留空壳，三项必填全靠环境变量
-	if _, err := Load(writeConfig(t, "server:\n  mode: release\n")); err != nil {
+	// 故意只留空壳，必填项全靠环境变量
+	cfg, err := Load(writeConfig(t, "server:\n  mode: release\n"))
+	if err != nil {
 		t.Fatalf("必填项应由环境变量补齐，实际报错: %v", err)
+	}
+	// 顺带锁住 derive 的执行时点：endpoint/bucket 来自环境变量，
+	// 若在 applyEnv 之前推导 public_base，这里会拿到空串。
+	if want := "https://imchat.oss-cn-hangzhou.aliyuncs.com"; cfg.Upload.PublicBase != want {
+		t.Fatalf("public_base 应由环境变量注入的桶名推导，期望 %q，实际 %q", want, cfg.Upload.PublicBase)
 	}
 }
 

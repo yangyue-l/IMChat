@@ -84,9 +84,18 @@ jwt:
   issuer: "imchat"
 
 upload:
-  dir: "./uploads"
   max_size_mb: 10
-  public_base: "/uploads"   # 对外访问前缀，留空则返回相对路径
+  # 图片对外访问前缀：接了 CDN 就填 CDN 域名，留空按 https://{bucket}.{endpoint} 推导。
+  # 必须是绝对地址，写成裸域名会被前端当成当前站点下的相对路径。
+  public_base: ""
+  oss:
+    # bucket 所在区域的访问域名，不带 bucket 前缀；协议头可省略，缺省 https。
+    endpoint: "oss-cn-hangzhou.aliyuncs.com"
+    bucket: ""
+    # 密钥不要写在这里（本文件进仓库），从环境变量注入：
+    #   IMCHAT_OSS_ACCESS_KEY_ID / IMCHAT_OSS_ACCESS_KEY_SECRET
+    access_key_id: ""
+    access_key_secret: ""
 
 message:
   # 撤回时间窗，只约束「撤回自己发的消息」；群管理员撤回他人消息不受此限制。
