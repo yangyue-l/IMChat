@@ -19,6 +19,7 @@ import (
 	"imchat/internal/middleware"
 	"imchat/internal/pkg/jwt"
 	"imchat/internal/service"
+	"imchat/internal/storage"
 	"imchat/internal/ws"
 )
 
@@ -31,6 +32,9 @@ type Router struct {
 	wsH     *ws.Handler
 	log     *slog.Logger
 	limiter *middleware.Limiter
+	// files 是图片存储，上传接口只依赖 storage.Storage 接口，
+	// 不认识具体介质（本地磁盘 / 对象存储）。
+	files storage.Storage
 	// probes 是 /healthz 要探测的外部依赖，名字直接作为响应字段名。
 	// 用一张表而不是几个固定字段：以后多一个依赖只改装配处，healthz 不用动。
 	probes map[string]Prober
@@ -39,10 +43,10 @@ type Router struct {
 // NewRouter 创建路由。
 func NewRouter(cfg *config.Config, svc *service.Services, jwtMgr *jwt.Manager,
 	c *cache.Cache, hub *ws.Hub, wsH *ws.Handler, limiter *middleware.Limiter,
-	probes map[string]Prober, log *slog.Logger) *gin.Engine {
+	files storage.Storage, probes map[string]Prober, log *slog.Logger) *gin.Engine {
 	r := &Router{
 		cfg: cfg, svc: svc, jwt: jwtMgr, hub: hub, wsH: wsH,
-		log: log, limiter: limiter, probes: probes,
+		log: log, limiter: limiter, files: files, probes: probes,
 	}
 
 	gin.SetMode(gin.ReleaseMode)
@@ -62,11 +66,9 @@ func NewRouter(cfg *config.Config, svc *service.Services, jwtMgr *jwt.Manager,
 	// 握手本身是连接数放大器，按 IP 限流挡住反复建连。
 	engine.GET("/ws", r.limiter.ByIP(r.ruleWSHandshake()), r.wsH.Serve)
 
-	// 本地文件访问，头像与朋友圈图片
-	engine.Static("/uploads", cfg.Upload.Dir)
-
-	// 演示前端
-	engine.StaticFile("/", "./web/index.html")
+	// 图片全部落在 OSS，读取由 CDN 或 bucket 域名直连，后端不提供静态文件路由。
+	// 前端同样与后端分离：页面由独立工程构建后托管在 nginx / CDN，
+	// gin 只留 API 与 WebSocket，不再挂载 index.html。
 
 	if cfg.Server.Pprof {
 		g := engine.Group("/debug/pprof")

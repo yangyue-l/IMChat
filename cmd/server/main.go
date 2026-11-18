@@ -20,6 +20,7 @@ import (
 	"imchat/internal/config"
 	"imchat/internal/handler"
 	"imchat/internal/infra"
+	"imchat/internal/media"
 	"imchat/internal/middleware"
 	"imchat/internal/mq"
 	"imchat/internal/pkg/jwt"
@@ -27,6 +28,7 @@ import (
 	"imchat/internal/pkg/snowflake"
 	"imchat/internal/repository"
 	"imchat/internal/service"
+	"imchat/internal/storage"
 	"imchat/internal/ws"
 )
 
@@ -76,6 +78,31 @@ func run(configPath string, nodeID int64) error {
 	store := cache.New(rdb, cfg.Cache)
 	jwtMgr := jwt.New(cfg.JWT)
 
+	// ---------- 文件存储（阿里云 OSS）----------
+	// 先给 media 装上对外前缀：库里只存对象 key，所有出站地址（用户/群头像、
+	// 动态配图、图片消息）都靠它拼成绝对地址，换 CDN 只改 upload.public_base。
+	media.Init(cfg.Upload.PublicBase)
+
+	files, err := storage.New(storage.Config{
+		Endpoint:        cfg.Upload.OSS.Endpoint,
+		Bucket:          cfg.Upload.OSS.Bucket,
+		AccessKeyID:     cfg.Upload.OSS.AccessKeyID,
+		AccessKeySecret: cfg.Upload.OSS.AccessKeySecret,
+	})
+	if err != nil {
+		return err
+	}
+	// 构造过程是纯本地的，桶名写错、凭据过期都要到这里才暴露。不探活的话
+	// 第一个上传的用户会替我们发现，而接口只会回一句「文件保存失败」。
+	{
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := files.Ping(ctx)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("对象存储不可用: %w", err)
+		}
+	}
+
 	// ---------- 事件总线：优先 RabbitMQ，未启用时降级为本地内存队列 ----------
 	registry := mq.NewRegistry()
 	var (
@@ -101,6 +128,8 @@ func run(configPath string, nodeID int64) error {
 	svc := service.New(service.Deps{
 		DB: db, Cache: store, JWT: jwtMgr,
 		Pusher: hub, Presence: hub, Kicker: hub, Pub: publisher,
+		// 回收图片对象（换头像、删动态、撤回图片）只用到 Delete
+		Files:    files,
 		Users:    repository.NewUserRepo(db),
 		Friends:  repository.NewFriendRepo(db),
 		Groups:   repository.NewGroupRepo(db),
@@ -136,8 +165,9 @@ func run(configPath string, nodeID int64) error {
 	probes := map[string]handler.Prober{
 		"mysql": handler.NewSQLProbe(sqlDB),
 		"redis": handler.NewRedisProbe(store),
+		"oss":   files,
 	}
-	engine := handler.NewRouter(cfg, svc, jwtMgr, store, hub, wsHandler, limiter, probes, log)
+	engine := handler.NewRouter(cfg, svc, jwtMgr, store, hub, wsHandler, limiter, files, probes, log)
 	engine.SetTrustedProxies(nil)
 
 	server := &http.Server{
