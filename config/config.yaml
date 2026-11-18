@@ -85,6 +85,9 @@ jwt:
 
 upload:
   max_size_mb: 10
+  # 单次上传的请求预算，与 server.read_timeout/write_timeout 分开算：
+  # 那 15s 是给普通接口的，10MB 在弱网上传不完。
+  timeout: 120s
   # 图片对外访问前缀：接了 CDN 就填 CDN 域名，留空按 https://{bucket}.{endpoint} 推导。
   # 必须是绝对地址，写成裸域名会被前端当成当前站点下的相对路径。
   public_base: ""
@@ -92,6 +95,10 @@ upload:
     # bucket 所在区域的访问域名，不带 bucket 前缀；协议头可省略，缺省 https。
     endpoint: "oss-cn-hangzhou.aliyuncs.com"
     bucket: ""
+    # 写入对象的 ACL：private | public-read | public-read-write | default。
+    # 留空表示不显式设置，跟随桶的默认策略；桶是私有的又要按 URL 直读图片时
+    # 必须填 public-read，否则上传成功但地址是 403。
+    acl: ""
     # 密钥不要写在这里（本文件进仓库），从环境变量注入：
     #   IMCHAT_OSS_ACCESS_KEY_ID / IMCHAT_OSS_ACCESS_KEY_SECRET
     access_key_id: ""

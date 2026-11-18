@@ -92,6 +92,7 @@ func baseConfig() *Config {
 		},
 		Upload: UploadConfig{
 			MaxSizeMB:  10,
+			Timeout:    Duration(120 * time.Second),
 			PublicBase: "https://cdn.example.com",
 			OSS: OSSConfig{
 				Endpoint:        "oss-cn-hangzhou.aliyuncs.com",
@@ -220,6 +221,8 @@ func TestLoadAppliesDefaults(t *testing.T) {
 		{"jwt.issuer", cfg.JWT.Issuer, "imchat"},
 
 		{"upload.max_size_mb", cfg.Upload.MaxSizeMB, 10},
+		// 上传预算必须与 server 的 15s 分开：10MB 在弱网上 15s 传不完。
+		{"upload.timeout", cfg.Upload.Timeout.Get(), 120 * time.Second},
 		// public_base 没配时要按 {bucket}.{endpoint} 推出来，
 		// 否则 storage.New 会拿到空前缀，返回的图片地址全是相对路径。
 		{"upload.public_base 推导", cfg.Upload.PublicBase, "https://imchat-test.oss-cn-hangzhou.aliyuncs.com"},
@@ -500,6 +503,11 @@ func TestValidate(t *testing.T) {
 		{"upload.max_size_mb 下界 1 通过", func(c *Config) { c.Upload.MaxSizeMB = 1 }, ""},
 		{"upload.max_size_mb 上界 100 通过", func(c *Config) { c.Upload.MaxSizeMB = 100 }, ""},
 		{"upload.max_size_mb 超上限", func(c *Config) { c.Upload.MaxSizeMB = 101 }, "upload.max_size_mb"},
+		{"upload.oss.acl 留空跟随桶策略", func(c *Config) { c.Upload.OSS.ACL = "" }, ""},
+		{"upload.oss.acl public-read 通过", func(c *Config) { c.Upload.OSS.ACL = "public-read" }, ""},
+		{"upload.oss.acl private 通过", func(c *Config) { c.Upload.OSS.ACL = "private" }, ""},
+		{"upload.oss.acl 非法值", func(c *Config) { c.Upload.OSS.ACL = "public" }, "upload.oss.acl"},
+		{"upload.timeout 负数", func(c *Config) { c.Upload.Timeout = Duration(-time.Second) }, "upload.timeout"},
 
 		{"recall_window 负数", func(c *Config) { c.Message.RecallWindow = Duration(-time.Second) }, "message.recall_window"},
 		{"recall_window 为 0 交给默认值", func(c *Config) { c.Message.RecallWindow = 0 }, ""},

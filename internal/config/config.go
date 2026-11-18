@@ -146,6 +146,13 @@ type JWTConfig struct {
 // 后端不再保留本地图片目录，也不再挂载静态资源路由。
 type UploadConfig struct {
 	MaxSizeMB int `yaml:"max_size_mb"`
+	// Timeout 是单次上传的请求预算，与普通接口的 15s 分开。
+	//
+	// 两者约束的是完全不同的东西：普通接口的 15s 是「慢查询不能拖垮连接池」，
+	// 而上传要传的是真实的 10MB 字节。按 15s 算，客户端上行带宽得稳定在
+	// 5.3Mbps 以上，移动网络上传一张原图就直接超时——前端看到的是「网络错误」，
+	// 而后端日志里什么都看不到（连接在读完 body 前就断了）。
+	Timeout Duration `yaml:"timeout"`
 	// PublicBase 是图片对外的访问前缀：接了 CDN 就填 CDN 域名，
 	// 没接时留空，按 https://{bucket}.{endpoint} 推导。
 	PublicBase string    `yaml:"public_base"`
@@ -163,6 +170,13 @@ type OSSConfig struct {
 	Bucket          string `yaml:"bucket"`
 	AccessKeyID     string `yaml:"access_key_id"`
 	AccessKeySecret string `yaml:"access_key_secret"`
+	// ACL 是写入对象的访问控制，取值 private / public-read /
+	// public-read-write / default，留空表示不显式设置，
+	// 让对象跟随桶的默认策略。
+	//
+	// 桶是私有的、图片却要按 URL 直读时，这里必须填 public-read，
+	// 否则上传能成功、拿到的地址却是 403。
+	ACL string `yaml:"acl"`
 }
 
 // MessageConfig 消息相关业务参数。
@@ -361,6 +375,11 @@ func (c *Config) applyDefaults() {
 	if c.Upload.MaxSizeMB == 0 {
 		c.Upload.MaxSizeMB = 10
 	}
+	// 10MB 在 1.4Mbps 上要 60s，给到 120s 才能在弱网下把「文件太大」与
+	// 「网速太慢」区分开；再长就是在给一个已经死掉的连接占着资源。
+	if c.Upload.Timeout == 0 {
+		c.Upload.Timeout = Duration(120 * time.Second)
+	}
 
 	if c.Message.RecallWindow == 0 {
 		c.Message.RecallWindow = Duration(2 * time.Minute)
@@ -382,6 +401,7 @@ func (c *Config) applyEnv() {
 	setStr(&c.Upload.OSS.Bucket, "IMCHAT_OSS_BUCKET")
 	setStr(&c.Upload.OSS.AccessKeyID, "IMCHAT_OSS_ACCESS_KEY_ID")
 	setStr(&c.Upload.OSS.AccessKeySecret, "IMCHAT_OSS_ACCESS_KEY_SECRET")
+	setStr(&c.Upload.OSS.ACL, "IMCHAT_OSS_ACL")
 }
 
 // derive 计算依赖其它字段的派生值。
@@ -479,6 +499,17 @@ func (c *Config) validate() error {
 	}
 	if c.Upload.OSS.AccessKeyID == "" || c.Upload.OSS.AccessKeySecret == "" {
 		return fmt.Errorf("upload.oss 凭据不能为空，请注入 IMCHAT_OSS_ACCESS_KEY_ID / IMCHAT_OSS_ACCESS_KEY_SECRET")
+	}
+	// ACL 写错不会报错，只会让 SDK 把这个字符串原样发给 OSS，
+	// 而 OSS 对非法值回的错误文案是「InvalidArgument」+ 内部字段名，
+	// 排障时很难联想到是配置笔误。
+	switch c.Upload.OSS.ACL {
+	case "", "default", "private", "public-read", "public-read-write":
+	default:
+		return fmt.Errorf("upload.oss.acl 只能是 private / public-read / public-read-write / default，当前 %q", c.Upload.OSS.ACL)
+	}
+	if c.Upload.Timeout <= 0 {
+		return fmt.Errorf("upload.timeout 必须为正数，当前 %s", c.Upload.Timeout.Get())
 	}
 	// 对外前缀必须是绝对地址：写成 "cdn.example.com" 这种裸域名会被前端当成
 	// 当前站点下的相对路径，图片静默全部 404，而接口返回的字段看起来完全正常。
