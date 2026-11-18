@@ -10,6 +10,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"imchat/internal/media"
 	"imchat/internal/model"
 	"imchat/internal/pkg/resp"
 	"imchat/internal/pkg/snowflake"
@@ -73,13 +74,24 @@ func (s *MomentService) Publish(ctx context.Context, uid int64, req PublishMomen
 	if strings.TrimSpace(req.Content) == "" && len(req.Images) == 0 {
 		return nil, resp.WithMsg(resp.ErrInvalidParam, "内容不能为空")
 	}
+	// 入库存 key、出站拼地址：前端回传的是上传接口给的绝对地址，直接落库的话
+	// 换 CDN 就要回刷整张 moments 表。
+	// 用 append 而不是 make，是为了保留「没有配图时 images 为 nil」这个原语义。
+	var images model.StringList
+	for _, raw := range req.Images {
+		key := media.Key(raw)
+		if len(key) > maxImageURLBytes {
+			return nil, resp.WithMsg(resp.ErrInvalidParam, "图片地址过长")
+		}
+		images = append(images, key)
+	}
 	visibility := req.Visibility
 	if visibility != model.MomentPublic && visibility != model.MomentFriends && visibility != model.MomentPrivate {
 		visibility = model.MomentFriends
 	}
 
 	m := &model.Moment{
-		UserID: uid, Content: req.Content, Images: req.Images,
+		UserID: uid, Content: req.Content, Images: images,
 		Visibility: visibility, Location: req.Location,
 	}
 	if err := s.deps.Moments.Create(ctx, m); err != nil {
@@ -103,7 +115,7 @@ func (s *MomentService) Publish(ctx context.Context, uid int64, req PublishMomen
 		pub = &p
 	}
 	return &MomentDTO{
-		ID: m.ID, User: pub, Content: m.Content, Images: m.Images,
+		ID: m.ID, User: pub, Content: m.Content, Images: media.URLs(m.Images),
 		Visibility: m.Visibility, Location: m.Location, CreatedAt: m.CreatedAt, IsMine: true,
 	}, nil
 }
@@ -391,7 +403,12 @@ func (s *MomentService) Delete(ctx context.Context, uid, momentID int64) error {
 	if m.UserID != uid {
 		return resp.WithMsg(resp.ErrForbidden, "只能删除自己的动态")
 	}
-	return s.deps.Moments.Delete(ctx, momentID, uid)
+	if err := s.deps.Moments.Delete(ctx, momentID, uid); err != nil {
+		return err
+	}
+	// 软删只是把动态藏起来，图片不再被任何地方引用，顺手回收
+	dropObjects(ctx, s.deps.Files, uid, m.Images...)
+	return nil
 }
 
 // checkMomentVisible 校验动态对当前用户是否可见。
@@ -469,7 +486,7 @@ func (s *MomentService) assemble(ctx context.Context, viewerID int64, list []mod
 	for i := range list {
 		m := &list[i]
 		dto := MomentDTO{
-			ID: m.ID, Content: m.Content, Images: m.Images, Visibility: m.Visibility,
+			ID: m.ID, Content: m.Content, Images: media.URLs(m.Images), Visibility: m.Visibility,
 			Location: m.Location, LikeCount: m.LikeCount, CommentCount: m.CommentCount,
 			CreatedAt: m.CreatedAt, IsMine: m.UserID == viewerID,
 			Likes: []model.PublicUser{}, Comments: []CommentDTO{},

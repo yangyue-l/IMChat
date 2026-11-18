@@ -12,6 +12,7 @@ import (
 	mysqldriver "github.com/go-sql-driver/mysql"
 	"gorm.io/gorm"
 
+	"imchat/internal/media"
 	"imchat/internal/model"
 	"imchat/internal/pkg/resp"
 )
@@ -151,6 +152,14 @@ func (s *MessageService) persistAndDeliver(ctx context.Context, sc *sendContext)
 		}
 	}
 
+	// 图片消息的 content 与 extra.url 都是前端回传的绝对地址，写入前统一还原成
+	// 对象 key：库里只存 key，换 CDN 时 messages 表不用回刷。
+	content, extra := sc.req.Content, sc.req.Extra
+	if sc.req.MsgType == model.MsgImage {
+		content = media.Key(content)
+		extra = stripExtraURL(extra, sc.req.Content)
+	}
+
 	// ID 由 model.BaseModel.BeforeCreate 统一分配，这里不再手动生成。
 	msg := &model.Message{
 		ConvID:      sc.convID,
@@ -161,8 +170,8 @@ func (s *MessageService) persistAndDeliver(ctx context.Context, sc *sendContext)
 		GroupID:     sc.groupID,
 		ClientMsgID: sc.req.ClientMsgID,
 		MsgType:     sc.req.MsgType,
-		Content:     sc.req.Content,
-		Extra:       sc.req.Extra,
+		Content:     content,
+		Extra:       extra,
 	}
 
 	// 4. 落库 + 刷新会话指针，必须同一事务。

@@ -66,6 +66,15 @@ type Publisher interface {
 	Publish(ctx context.Context, evt Event) error
 }
 
+// Files 是对象存储的删除能力，由 storage.Storage 实现。
+//
+// 只收删除：service 从不写对象（上传发生在 handler），把 Put 一并给它，等于
+// 让「字节从 service 流向存储」变成可能，破坏了「只由 handler 写」这条线。
+type Files interface {
+	// Delete 批量删除对象，实现需幂等：对象已经不存在不算失败。
+	Delete(ctx context.Context, keys ...string) error
+}
+
 // Deps 汇总 service 依赖，由 main 统一装配。
 type Deps struct {
 	DB       *gorm.DB
@@ -75,6 +84,9 @@ type Deps struct {
 	Presence Presence
 	Kicker   DeviceKicker
 	Pub      Publisher
+	// Files 用于回收不再被引用的图片对象（换头像、删动态、撤回图片）。
+	// 允许为 nil：不关心回收的调用方（主要是单测）不需要实现一个空删除器。
+	Files Files
 
 	Users    *repository.UserRepo
 	Friends  *repository.FriendRepo

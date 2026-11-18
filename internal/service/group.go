@@ -7,6 +7,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"imchat/internal/media"
 	"imchat/internal/model"
 	"imchat/internal/pkg/jsonx"
 	"imchat/internal/pkg/resp"
@@ -282,7 +283,8 @@ func buildMemberItems(members []model.GroupMember, users map[int64]model.PublicU
 
 // Update 修改群资料，仅管理员可操作。
 func (s *GroupService) Update(ctx context.Context, uid, gid int64, req UpdateGroupReq) error {
-	_, me, err := s.mustBeMember(ctx, uid, gid)
+	// 取群行是为了拿到旧头像：换头像时要把旧对象回收掉
+	g, me, err := s.mustBeMember(ctx, uid, gid)
 	if err != nil {
 		return err
 	}
@@ -290,6 +292,8 @@ func (s *GroupService) Update(ctx context.Context, uid, gid int64, req UpdateGro
 		return resp.WithMsg(resp.ErrForbidden, "只有群主或管理员可以修改群资料")
 	}
 	fields := map[string]any{}
+	// 旧头像：本次改头像且新旧不同时才需要回收（同一地址重复保存不能删）
+	var oldAvatar string
 	if req.Name != nil {
 		n := *req.Name
 		if len([]rune(n)) == 0 || len([]rune(n)) > 20 {
@@ -298,7 +302,15 @@ func (s *GroupService) Update(ctx context.Context, uid, gid int64, req UpdateGro
 		fields["name"] = n
 	}
 	if req.Avatar != nil {
-		fields["avatar"] = *req.Avatar
+		// 入库存 key、出站拼地址，与用户头像同一口径
+		key := media.Key(*req.Avatar)
+		if len(key) > maxAvatarBytes {
+			return resp.WithMsg(resp.ErrInvalidParam, "群头像地址过长")
+		}
+		fields["avatar"] = key
+		if oldKey := media.Key(g.Avatar); oldKey != "" && oldKey != key {
+			oldAvatar = oldKey
+		}
 	}
 	if req.Notice != nil {
 		if len([]rune(*req.Notice)) > 300 {
@@ -311,6 +323,12 @@ func (s *GroupService) Update(ctx context.Context, uid, gid int64, req UpdateGro
 	}
 	if err := s.deps.Groups.UpdateFields(ctx, gid, fields); err != nil {
 		return err
+	}
+	// 换群头像时回收旧对象。归属者按「当前操作的管理员」判断：群头像可能是
+	// 另一个管理员传的，那种情况这里会跳过并留一个孤儿，这是有意的取舍 ——
+	// 宁可不删，也不按库里存的地址去删别人的对象。
+	if oldAvatar != "" {
+		dropObjects(ctx, s.deps.Files, uid, oldAvatar)
 	}
 	s.notify(ctx, gid, "update", map[string]any{"group_id": gid, "operator": uid})
 	return nil
@@ -625,7 +643,7 @@ func (s *GroupService) notify(ctx context.Context, gid int64, action string, dat
 
 func (s *GroupService) toItem(g *model.Group, role int8, muted bool) *GroupItem {
 	return &GroupItem{
-		ID: g.ID, Name: g.Name, Avatar: g.Avatar, OwnerID: g.OwnerID,
+		ID: g.ID, Name: g.Name, Avatar: g.AvatarURL(), OwnerID: g.OwnerID,
 		Notice: g.Notice, MemberCount: g.MemberCount, MaxMember: g.MaxMember,
 		MyRole: role, Muted: muted, CreatedAt: g.CreatedAt,
 	}

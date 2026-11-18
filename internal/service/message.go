@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"imchat/internal/media"
 	"imchat/internal/model"
 	"imchat/internal/pkg/resp"
 )
@@ -152,13 +153,52 @@ func parseConv(convID string, self int64) (int8, int64, bool) {
 // toDTO 是消息出站的唯一转换点：历史、检索、发送回执三条链路都过这里，
 // 少一处单独拼装就少一处「某个接口忘了带 quote」的可能。
 func toDTO(m *model.Message, from *model.PublicUser) *MessageDTO {
+	// 图片消息的 content 存的是对象 key，出站要拼成完整地址。
+	// 其它类型是纯文本，过一遍 media.URL 反而会把普通文本当成 key 拼上前缀。
+	content := m.Content
+	if m.MsgType == model.MsgImage {
+		content = media.URL(content)
+	}
 	return &MessageDTO{
 		ID: m.ID, ConvID: m.ConvID, ConvType: m.ConvType, Seq: m.Seq,
 		FromID: m.FromID, ToID: m.ToID, GroupID: m.GroupID,
-		ClientMsgID: m.ClientMsgID, MsgType: m.MsgType, Content: m.Content,
+		ClientMsgID: m.ClientMsgID, MsgType: m.MsgType, Content: content,
 		Extra: m.Extra, Quote: quoteOf(m.Extra), Status: m.Status,
 		CreatedAt: m.CreatedAt, FromUser: from,
 	}
+}
+
+// stripExtraURL 去掉 extra 里与 content 重复的图片地址。
+//
+// 前端发图片消息时会在 extra 里再塞一份 {"url": "..."}，那是它渲染时优先取用的
+// 快捷字段；但它和 content 是同一个值，两边都留绝对地址，换 CDN 就得回刷整张
+// messages 表。这里只删「与 content 完全相同」的那一份：客户端如果放的是别的值
+// （比如缩略图地址），保持原样，不替它做决定。
+//
+// 用 map[string]json.RawMessage 而不是 map[string]any：extra 里可能有客户端自定义
+// 字段，转成 any 会把数字变成 float64 再序列化，大整数就此失真。
+func stripExtraURL(extra, content string) string {
+	if extra == "" || content == "" {
+		return extra
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(extra), &fields); err != nil {
+		return extra
+	}
+	var url string
+	if raw, ok := fields["url"]; !ok || json.Unmarshal(raw, &url) != nil || url != content {
+		return extra
+	}
+	delete(fields, "url")
+	if len(fields) == 0 {
+		// 只剩一个 url 时整段清空：库里留一个 "{}" 没有任何意义
+		return ""
+	}
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return extra
+	}
+	return string(out)
 }
 
 // quoteOf 从 extra 里取出引用摘要。extra 不是 JSON、没有 quote 字段或 ID 非法时

@@ -222,7 +222,7 @@ func (s *MessageService) Conversations(ctx context.Context, uid int64) ([]Conver
 		}
 		item := ConversationDTO{
 			ConvID: convID, ConvType: model.ConvGroup, TargetID: g.ID,
-			Name: g.Name, Avatar: g.Avatar, MemberCount: g.MemberCount,
+			Name: g.Name, Avatar: g.AvatarURL(), MemberCount: g.MemberCount,
 			LastMsgID: g.LastMsgID, LastMsgPreview: g.LastMsgPreview,
 			LastMsgType: g.LastMsgType,
 			Unread:      unreadOfGroup(g.LastMsgSeq, readSeq),

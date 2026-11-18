@@ -36,6 +36,12 @@ func (s *MessageService) Recall(ctx context.Context, uid, msgID int64) error {
 	if err := s.deps.Messages.Recall(ctx, msgID); err != nil {
 		return err
 	}
+	// 图片消息撤回后，content 里那个对象不再被任何可见内容引用，顺手回收。
+	// 归属者用发送者而不是操作者：管理员撤回他人消息时两者不同，
+	// 用操作者判断会让本该回收的对象全部跳过。
+	if msg.MsgType == model.MsgImage {
+		dropObjects(ctx, s.deps.Files, msg.FromID, msg.Content)
+	}
 
 	payload := NewFrame(FrameMessageRecall, map[string]any{
 		"conv_id": msg.ConvID, "msg_id": msg.ID, "seq": msg.Seq, "operator": uid,

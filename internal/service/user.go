@@ -12,6 +12,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"imchat/internal/cache"
+	"imchat/internal/media"
 	"imchat/internal/model"
 	"imchat/internal/pkg/resp"
 )
@@ -234,6 +235,8 @@ func (s *UserService) Online(ctx context.Context, viewerID, targetID int64) (boo
 // UpdateProfile 修改资料并失效缓存。
 func (s *UserService) UpdateProfile(ctx context.Context, uid int64, req UpdateProfileReq) (*model.PublicUser, error) {
 	fields := map[string]any{}
+	// 旧头像：本次改头像且新旧不同时才需要回收（同一地址重复保存不能删）
+	var oldAvatar string
 	if req.Nickname != nil {
 		n := strings.TrimSpace(*req.Nickname)
 		if n == "" || len([]rune(n)) > 16 {
@@ -242,7 +245,20 @@ func (s *UserService) UpdateProfile(ctx context.Context, uid int64, req UpdatePr
 		fields["nickname"] = n
 	}
 	if req.Avatar != nil {
-		fields["avatar"] = *req.Avatar
+		// 前端回传的是上传接口给的绝对地址，入库存 key：换 CDN 时这张表不用回刷
+		key := media.Key(*req.Avatar)
+		if len(key) > maxAvatarBytes {
+			return nil, resp.WithMsg(resp.ErrInvalidParam, "头像地址过长")
+		}
+		fields["avatar"] = key
+		// 换头像要回收旧对象，旧值先取出来。取不到不阻断：清理是附带动作，
+		// 退化成留一个孤儿，好过让用户改不了资料。
+		if old, err := s.Profile(ctx, uid); err == nil && old != nil {
+			// 同一个地址重复保存时新旧 key 相同，那个对象仍被引用，不能删
+			if oldKey := media.Key(old.Avatar); oldKey != "" && oldKey != key {
+				oldAvatar = oldKey
+			}
+		}
 	}
 	if req.Gender != nil {
 		if *req.Gender < 0 || *req.Gender > 2 {
@@ -263,6 +279,10 @@ func (s *UserService) UpdateProfile(ctx context.Context, uid int64, req UpdatePr
 		return nil, err
 	}
 	_ = s.deps.Cache.DelUser(ctx, uid)
+	// 旧头像在库里已经不被引用了，回收它。放在写成功之后，理由见 dropObjects。
+	if oldAvatar != "" {
+		dropObjects(ctx, s.deps.Files, uid, oldAvatar)
+	}
 	return s.Profile(ctx, uid)
 }
 
