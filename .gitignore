@@ -5,13 +5,14 @@ bin/
 *.out
 
 # 运行时数据
-uploads/*
-!uploads/.gitkeep
 logs/
 *.log
 
 # 本地配置覆盖
 config/config-local.yaml
+
+# 前端依赖（构建产物 web/index.html 需要提交）
+web/node_modules/
 
 # IDE
 .idea/
@@ -24,3 +25,7 @@ config/config-local.yaml
 # 系统
 .DS_Store
 Thumbs.db
+
+# 前端本地环境变量（VITE_* 覆盖构建基地址）
+web/.env.local
+web/.env.*.local
