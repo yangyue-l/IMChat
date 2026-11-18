@@ -102,10 +102,13 @@ func (r *Router) upload(c *gin.Context) {
 	if err != nil {
 		// 存储侧的失败原因必须进日志：接口只回「保存失败」，
 		// 没有这条日志就分不清是磁盘满了、桶配错了还是凭据过期。
+		r.uploadFailed.Add(1)
 		r.log.Error("图片上传失败", "ext", ext, "size", file.Size, "err", err)
 		resp.Fail(c, resp.WithMsg(resp.ErrInternal, "文件保存失败"))
 		return
 	}
+	r.uploadOK.Add(1)
+	r.uploadBytes.Add(file.Size)
 
 	// 同时回 key 与 url：url 给前端直接渲染，key 是入库形态。
 	// 只回 url 的话，前端存进 avatar / images 的就是绝对地址，换 CDN 要回刷数据。

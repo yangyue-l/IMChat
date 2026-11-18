@@ -215,6 +215,38 @@ func TestUploadReportsStorageFailure(t *testing.T) {
 	}
 }
 
+// 上传指标只数「真正进了存储层」的那一步。
+//
+// 参数校验失败混进来会让失败率在用户乱传文件时飙升，把真正的存储故障淹掉；
+// 成功数与字节数则要能对上，否则容量规划没有依据。
+func TestUploadMetrics(t *testing.T) {
+	r := newUploadRouter(&fakeStorage{})
+
+	callUpload(t, r, 1001, "a.png", []byte("12345")) // 成功，5 字节
+	callUpload(t, r, 1001, "a.exe", []byte("x"))     // 白名单拒绝，不计入
+	callUpload(t, r, 1001, "a.png", []byte("123"))   // 成功，3 字节
+
+	if got := r.uploadOK.Load(); got != 2 {
+		t.Fatalf("成功计数 = %d，期望 2", got)
+	}
+	if got := r.uploadFailed.Load(); got != 0 {
+		t.Fatalf("参数校验失败不应计入存储失败，实际 %d", got)
+	}
+	if got := r.uploadBytes.Load(); got != 8 {
+		t.Fatalf("字节计数 = %d，期望 8", got)
+	}
+
+	// 存储报错才计入失败
+	r.files = &fakeStorage{putErr: storage.ErrUnavailable}
+	callUpload(t, r, 1001, "a.png", []byte("x"))
+	if got := r.uploadFailed.Load(); got != 1 {
+		t.Fatalf("存储失败计数 = %d，期望 1", got)
+	}
+	if got := r.uploadOK.Load(); got != 2 {
+		t.Fatalf("存储失败不该计入成功，实际成功数 %d", got)
+	}
+}
+
 // delayedReader 在第一次 Read 时先睡一段时间，把请求体拖慢。
 // 用「睡一次」而不是「每次读都睡」：总耗时与客户端的读次数无关，用例才稳定。
 type delayedReader struct {

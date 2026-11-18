@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/gin-gonic/gin"
 
@@ -38,6 +39,13 @@ type Router struct {
 	// probes 是 /healthz 要探测的外部依赖，名字直接作为响应字段名。
 	// 用一张表而不是几个固定字段：以后多一个依赖只改装配处，healthz 不用动。
 	probes map[string]Prober
+
+	// 上传指标。用原子计数而不是锁：纯统计，不值得为它引入竞争。
+	// 只数「真正进了存储层」的那一步：参数校验失败（格式、大小）不是存储问题，
+	// 混在一起会让「上传失败率」在用户乱传文件时飙升，把真正的存储故障淹掉。
+	uploadOK     atomic.Int64
+	uploadFailed atomic.Int64
+	uploadBytes  atomic.Int64
 }
 
 // NewRouter 创建路由。
@@ -244,6 +252,9 @@ func (r *Router) metrics(c *gin.Context) {
 	writeMetric(c, "imchat_goroutines", "goroutine 数量", metricGauge, float64(runtime.NumGoroutine()))
 	writeMetric(c, "imchat_heap_alloc_bytes", "堆内存占用", metricGauge, float64(m.HeapAlloc))
 	writeMetric(c, "imchat_gc_count_total", "GC 次数", metricCounter, float64(m.NumGC))
+	writeMetric(c, "imchat_upload_success_total", "累计写入对象存储成功的图片数", metricCounter, float64(r.uploadOK.Load()))
+	writeMetric(c, "imchat_upload_failed_total", "累计写入对象存储失败的图片数", metricCounter, float64(r.uploadFailed.Load()))
+	writeMetric(c, "imchat_upload_bytes_total", "累计写入对象存储的图片字节数", metricCounter, float64(r.uploadBytes.Load()))
 }
 
 // writeBuildInfo 输出版本信息。
