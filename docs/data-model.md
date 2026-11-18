@@ -113,7 +113,7 @@
 | `username` | varchar(32) | 登录账号，**唯一索引**，注册后不可改 |
 | `password_hash` | varchar(100) | 密码摘要，`json:"-"`，任何响应都不输出 |
 | `nickname` | varchar(32) | 展示名，可重复、可改 |
-| `avatar` | varchar(255) | 头像 URL |
+| `avatar` | varchar(255) | 头像**对象 key**（如 `u/1001/2026/11/18/xxx.webp`），出站由 `media` 拼成绝对地址；历史数据里的绝对地址原样兼容 |
 | `gender` | tinyint | 0 未知 / 1 男 / 2 女，默认 0 |
 | `signature` | varchar(255) | 个性签名 |
 | `phone` | varchar(20) NULL | 预留手机号，**当前 service 层无任何读写**；`*string` + **唯一索引** |
@@ -172,7 +172,7 @@
 |---|---|---|
 | `id` | int64 | 主键 |
 | `name` | varchar(64) | 群名 |
-| `avatar` | varchar(255) | 群头像 |
+| `avatar` | varchar(255) | 群头像**对象 key**，口径同 `users.avatar` |
 | `owner_id` | int64 | 群主 uid，索引 |
 | `notice` | varchar(500) | 群公告 |
 | `member_count` | int | 冗余成员数，列表页免 `count(*)` |
@@ -219,8 +219,8 @@
 | `group_id` | int64 | 群 ID；**私聊固定 0**，索引 |
 | `client_msg_id` | varchar(64) | 客户端幂等键，**唯一索引**，全局唯一不区分发送者 |
 | `msg_type` | tinyint | 1 文本 / 2 图片 / 3 文件 / 4 系统 |
-| `content` | text | 正文；文本上限 `maxContentRunes(5000)`，由 service 校验 |
-| `extra` | varchar(1024) | JSON 扩展：图片宽高、文件名等；service 按字节校验 `maxExtraBytes(1024)` |
+| `content` | text | 正文；文本上限 `maxContentRunes(5000)`，由 service 校验。**图片消息存对象 key**，出站拼成绝对地址 |
+| `extra` | varchar(1024) | JSON 扩展：图片宽高、文件名等；service 按字节校验 `maxExtraBytes(1024)`。图片消息里与 `content` 重复的 `url` 字段会被去掉 |
 | `status` | tinyint | 0 正常 / 1 已撤回 |
 | `created_at` | datetime | 发送时间；撤回窗口按它判断 |
 | `updated_at` | datetime | 状态变更时间（撤回会刷新） |
@@ -285,7 +285,7 @@ hash 过期或 Redis 重启后，`Conversations` 先按 `ListReadSeqs` 回源，
 | `id` | int64 | 主键 |
 | `user_id` | int64 | 作者，索引 |
 | `content` | text | 文字正文，上限 2000 字（service 校验） |
-| `images` | text | `StringList` 序列化的 JSON 数组，上限 9 张 |
+| `images` | text | `StringList` 序列化的 JSON 数组，上限 9 张；元素是**对象 key**，出站拼成绝对地址 |
 | `visibility` | tinyint | 1 公开 / 2 仅好友 / 3 私密；非法值在 service 层降级为 2 |
 | `location` | varchar(64) | 位置文本 |
 | `like_count` | int | 冗余点赞数，与明细同事务增减，`GREATEST(...,0)` 防负 |

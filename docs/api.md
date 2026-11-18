@@ -59,7 +59,7 @@
 ### GET /users/me · PATCH /users/me
 
 ```json
-{ "nickname": "新昵称", "avatar": "/uploads/xx.png", "gender": 1, "signature": "签名" }
+{ "nickname": "新昵称", "avatar": "https://cdn.example.com/2026/11/18/xxx.png", "gender": 1, "signature": "签名" }
 ```
 
 ### GET /users/search?keyword=ali&limit=20
@@ -205,7 +205,7 @@
 ### PATCH /groups/:group_id
 
 ```json
-{ "name": "新群名", "avatar": "/uploads/xx.png", "notice": "群公告" }
+{ "name": "新群名", "avatar": "https://cdn.example.com/2026/11/18/xxx.png", "notice": "群公告" }
 ```
 
 需群主或管理员。
@@ -396,7 +396,7 @@ Redis 不可用时该接口返回 `total: 0` + 空列表并记 Warn，不返回�
 ### POST /moments
 
 ```json
-{ "content": "今天天气不错", "images": ["/uploads/2026/10/23/xxx.jpg"], "visibility": 2 }
+{ "content": "今天天气不错", "images": ["https://cdn.example.com/2026/10/23/xxx.jpg"], "visibility": 2 }
 ```
 
 `visibility`：1 公开、2 仅好友、3 私密。图片最多 9 张。
@@ -427,7 +427,25 @@ Redis 不可用时该接口返回 `total: 0` + 空列表并记 Warn，不返回�
 ### POST /upload
 
 `multipart/form-data`，字段名 `file`。支持 jpg/png/gif/webp，默认上限 10MB。
-返回 `{ "url": "/uploads/2026/10/23/xxx.png", "size": 12345 }`。
+返回 `{ "key": "u/1001/2026/11/18/xxx.png", "url": "https://cdn.example.com/u/1001/2026/11/18/xxx.png", "size": 12345 }`。
+
+返回的 `url` 是**完整的绝对地址**（对象存储或 CDN），前端可以直接当 `<img src>` 用，
+不需要再拼任何前缀。
+
+两个字段的分工：
+
+| 字段 | 形态 | 用途 |
+|---|---|---|
+| `url` | 绝对地址 | 直接渲染，或写进 `avatar` / `images` / 图片消息的 `content` |
+| `key` | `u/{uid}/{yyyy}/{mm}/{dd}/{雪花}{ext}` | 入库形态；同一对象在库里的规范表示 |
+
+写接口（`PATCH /users/me`、`PATCH /groups/:id`、`POST /moments`、`POST /messages/*`）
+**两种形态都接受**：服务端写入前统一还原成 key，所以回传 `url` 也不会把绝对地址
+落到库里。存量数据里的绝对地址在读取时原样返回，不需要迁移。
+
+这样换 CDN、换域名只改 `upload.public_base` 一个配置，不用回刷任何业务表。
+对象名带上传者 uid、日期目录与雪花 ID，不含原始文件名，因此不可猜、也不会互相覆盖；
+uid 这一段同时是服务端回收对象前判断归属的依据（见「换头像 / 删动态 / 撤回图片」的回收规则）。
 
 ---
 

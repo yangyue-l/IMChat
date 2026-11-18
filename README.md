@@ -43,7 +43,59 @@ go run ./cmd/server -c config/config.yaml -node 1
 服务启动后会自动建表。访问 <http://127.0.0.1:8080/> 打开演示前端，
 注册两个账号即可体验完整流程（建议开两个浏览器窗口）。
 
-### 3. 验证（48 项端到端用例）
+### 3. 前端
+
+前端源码与产物都在 `web/` 下，职责靠目录区分：
+
+```
+web/
+├── app/                # Vue 3 + Vite 源码（Vite root，入口 app/index.html）
+├── index.html          # 构建产物：自包含单文件，由 nginx / 静态站点托管
+├── package.json
+├── vite.config.js
+└── node_modules/       # 依赖，不入库
+```
+
+构建产物是自包含的单个 HTML（JS / CSS 全部内联）。后端**不托管**它：
+gin 只提供 API 与 WebSocket，页面由 nginx 或静态站点托管，两者可以分别部署、分别扩容。
+
+```bash
+# 构建（产物写入 web/index.html，随后交给 nginx / 静态站点托管）
+make web
+# 等价于：cd web && npm install && npm run build
+
+# 开发模式：Vite 起在 :5173，/api 与 /ws 代理到 :8080
+make web-dev
+```
+
+> 仓库里已经提交了构建产物，只跑后端时无需安装 Node。改动 `web/app/` 后再执行 `make web` 即可。
+
+#### 部署拓扑
+
+前后端完全分离，三部分各自独立部署：
+
+| 部分 | 内容 | 在哪 |
+|---|---|---|
+| 前端 | `web/index.html` 构建产物 | nginx / CDN / 静态站点 |
+| 后端 | `/api/v1/*`、`/ws` | Go 服务，只出接口 |
+| 图片 | 用户上传的头像、聊天图、朋友圈配图 | 阿里云 OSS（`upload.public_base` 指向 CDN 或 bucket 域名） |
+
+前端在**构建期**指定两个地址（默认同源，不配就保持同域部署的行为）：
+
+```bash
+VITE_API_BASE=https://api.example.com/api/v1 \
+VITE_WS_BASE=wss://api.example.com \
+npm run build
+```
+
+- `VITE_WS_BASE` 也接受 `https://` 写法，运行时自动换成 `wss://`；
+- 图片不需要前端拼前缀：上传接口返回的就是完整的绝对 URL，写进 `avatar` / `images` 后可直接 `<img src>`；
+- 这些变量也可以写在 `web/.env.local`（已 gitignore），避免每次手敲。
+
+跨域后端已经就绪：`middleware.CORS()` 反射 `Origin` 并放行 `Authorization`，
+WebSocket 的 `CheckOrigin` 目前恒为 `true`（生产环境建议改成白名单）。
+
+### 4. 验证（48 项端到端用例）
 
 ```bash
 # 单节点
@@ -57,7 +109,7 @@ go run ./cmd/smoke -base http://127.0.0.1:8080 -cluster-base http://127.0.0.1:80
 覆盖：注册登录、好友申请与通过、私聊实时推送、消息幂等、撤回权限、
 拉黑拦截、群聊权限矩阵、朋友圈可见性与拉黑过滤、已读回执、跨节点投递。
 
-### 4. 关键地址
+### 5. 关键地址
 
 | 地址 | 用途 |
 |---|---|
@@ -88,9 +140,13 @@ IMChat/
 │   ├── mq/                # RabbitMQ 生产/消费 + 本地兜底总线
 │   ├── cache/             # Redis 封装（缓存/计数/在线状态）
 │   ├── infra/             # MySQL / Redis 连接
+│   ├── storage/           # 对象存储（阿里云 OSS），只管写入与回收
+│   ├── media/             # 对象 key 与对外访问地址互转（换 CDN 只改配置）
 │   ├── middleware/        # 鉴权、限流、日志、跨域
 │   └── pkg/               # jwt / 雪花 ID / 响应 / 日志
-├── web/index.html         # 单文件演示前端
+├── web/                   # 前端（源码 + 构建产物）
+│   ├── app/               #   Vue 3 + Vite 源码
+│   └── index.html         #   单文件构建产物，由 nginx / 静态站点托管
 └── docs/                  # 设计与接口文档
     ├── architecture.md    # 架构与关键取舍
     ├── data-model.md      # 数据模型字段与索引清单
@@ -180,7 +236,8 @@ IMChat/
 
 ## 五、配置说明
 
-`config/config.yaml` 中所有项都有合理默认值，最常改的几项可用环境变量覆盖：
+`config/config.yaml` 中除了凭据类必填项（MySQL DSN、Redis 地址、JWT 密钥、OSS 凭据）之外都有合理默认值，
+最常改的几项可用环境变量覆盖：
 
 | 环境变量 | 对应配置 |
 |---|---|
@@ -191,6 +248,10 @@ IMChat/
 | `IMCHAT_RABBITMQ_URL` | `rabbitmq.url` |
 | `IMCHAT_JWT_SECRET` | `jwt.secret` |
 | `IMCHAT_UPLOAD_PUBLIC_BASE` | `upload.public_base` |
+| `IMCHAT_OSS_ENDPOINT` | `upload.oss.endpoint` |
+| `IMCHAT_OSS_BUCKET` | `upload.oss.bucket` |
+| `IMCHAT_OSS_ACCESS_KEY_ID` | `upload.oss.access_key_id` |
+| `IMCHAT_OSS_ACCESS_KEY_SECRET` | `upload.oss.access_key_secret` |
 
 只有字符串项能被环境变量覆盖，数字、布尔、时长只能改配置文件。
 完整配置项（默认值、取值范围）、多节点部署要点与优雅停机顺序见 `docs/deploy.md`。

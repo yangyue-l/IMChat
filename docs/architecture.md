@@ -344,7 +344,9 @@ go tool pprof http://127.0.0.1:8080/debug/pprof/profile?seconds=30
 | 私聊未读存 Redis | 高频读写 | Redis 不可用时读 `conversation_reads` 兜底 |
 | 群未读不落存储 | 用 seq 差值算，天然无写放大 | 无需调整 |
 | 单实例 Hub | 部署简单、延迟最低 | 已预留 Redis 总线，配置即切换 |
-| 图片存本地磁盘 | 零依赖 | 抽象成 URL，换 OSS 只改 upload |
+| 图片落阿里云 OSS | 后端不占磁盘、多节点天然共享 | 已抽成 `storage.Storage`，换介质只改该包 |
+| 库里存对象 key，出站拼地址 | 换 CDN / 换域名只改配置，不回刷业务表 | 拼接规则集中在 `media`，DTO 转换层统一调用 |
+| 前后端完全分离 | 各自独立部署与扩容，后端只出 API | 前端产物由 nginx / 静态站点托管 |
 | 消息表未分片 | 单表千万级仍可支撑 | 按 `conv_id` 哈希或时间分区 |
 
 ---
@@ -352,7 +354,7 @@ go tool pprof http://127.0.0.1:8080/debug/pprof/profile?seconds=30
 ## 九、可用性措施
 
 - **优雅停机**：先 `server.Shutdown` 停止新请求 → 断开所有 WS → 停止消费 → 关闭连接。
-- **健康检查** `/healthz` 并发探测 MySQL 与 Redis（各 1s 超时），任一不可用即
+- **健康检查** `/healthz` 并发探测 MySQL、Redis 与 OSS（各 1s 超时），任一不可用即
   `status=degraded`，但 HTTP 仍返回 200 —— 是否摘机由负载均衡按 `status` 判断，
   避免依赖抖动引发摘除/加回的风暴。
 - **超时全覆盖**：`http.Server` 的 ReadHeader/Read/Write/Idle 全设，请求级 context 超时，

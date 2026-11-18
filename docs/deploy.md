@@ -150,9 +150,11 @@ mysql -h127.0.0.1 -P13306 -uroot -p imchat < deploy/migrate/20261024-index-refac
 | `jwt.secret` | 无 | **至少 16 位**，必填 | 生产必须替换；多节点必须一致 |
 | `jwt.expire` | `168h` | 正时长 | 令牌有效期 |
 | `jwt.issuer` | `imchat` | 非空字符串 | 签发者，解析时校验 |
-| `upload.dir` | `./uploads` | 可写目录 | 本地存储目录，同时也是 `/uploads` 静态路由的根 |
-| `upload.max_size_mb` | `10` | `1`~`100` | 单文件上限。负数会被标准库当成 0 而上传播失败，过大则单请求就吃掉磁盘与带宽 |
-| `upload.public_base` | 空 | 字符串 | 对外访问前缀，留空返回相对路径 |
+| `upload.max_size_mb` | `10` | `1`~`100` | 单文件上限。负数会被标准库当成 0 而上传播失败，过大则单请求就吃满内存与带宽 |
+| `upload.public_base` | 空 | `http(s)://` 开头的绝对地址 | 图片对外前缀。留空按 `https://{bucket}.{endpoint}` 推导；写成裸域名会被前端当成相对路径，图片静默 404 |
+| `upload.oss.endpoint` | 无 | 必填 | bucket 所在区域的访问域名，不带 bucket 前缀，协议头可省略（缺省按 https） |
+| `upload.oss.bucket` | 无 | 必填 | 桶名 |
+| `upload.oss.access_key_id` / `access_key_secret` | 无 | 必填 | RAM 用户凭据，最小权限只需 `oss:PutObject` / `oss:GetObject`；**不要写进 yaml**，走环境变量 |
 | `message.recall_window` | `2m` | 非负时长 | 撤回自己的消息的时间窗，负数启动即报错 |
 
 > 仓库自带的 `config/config.yaml` 与代码默认值有若干处不同（例如 `pprof: true`、
@@ -174,6 +176,10 @@ mysql -h127.0.0.1 -P13306 -uroot -p imchat < deploy/migrate/20261024-index-refac
 | `IMCHAT_RABBITMQ_URL` | `rabbitmq.url` |
 | `IMCHAT_JWT_SECRET` | `jwt.secret` |
 | `IMCHAT_UPLOAD_PUBLIC_BASE` | `upload.public_base` |
+| `IMCHAT_OSS_ENDPOINT` | `upload.oss.endpoint` |
+| `IMCHAT_OSS_BUCKET` | `upload.oss.bucket` |
+| `IMCHAT_OSS_ACCESS_KEY_ID` | `upload.oss.access_key_id` |
+| `IMCHAT_OSS_ACCESS_KEY_SECRET` | `upload.oss.access_key_secret` |
 
 加载顺序是 **YAML → 代码默认值 → 环境变量 → 校验**：
 
@@ -198,11 +204,19 @@ mysql -h127.0.0.1 -P13306 -uroot -p imchat < deploy/migrate/20261024-index-refac
    集群下实际配额 = 配置值 × 节点数；`distributed=true` 时段窗口总量跨节点共享，
    扩容不会顺带放宽配额，应优先用它。
 7. **`ws_max_conns` 按节点计**：同一用户的两个设备连到不同节点时，各节点各自计数。
-8. **`upload.dir` 是本地磁盘**。多节点必须挂共享存储，或前置对象存储并改 `upload.public_base`
-   指向外部地址；否则 A 节点上传的图片在 B 节点 404。
-9. **RabbitMQ 队列名固定**（`im.events` / `im.events.q`），多节点自然形成竞争消费，
-   不需要额外配置；`consumer_workers × prefetch` 要按节点数折算总未确认量。
-10. **`mysql.max_open_conns` 要折算**：默认 200 是单节点口径，10 个节点就是 2000 条连接。
+8. **图片全部在 OSS**，多节点天然共享同一份数据，不需要挂共享磁盘，也没有「A 节点上传、B 节点 404」的问题。
+   库里存的是对象 key，对外地址由 `media` 拼成：**换 CDN 只改 `upload.public_base`，
+   不用刷 `users` / `groups` / `moments` / `messages` 四张表**。唯一会短暂滞留旧域名的是
+   用户信息缓存（`cache.user_ttl`，默认 10 分钟），切域名后等一个 TTL 或重启即可。
+   对象 key 不可变，所以上传时给了 `Cache-Control: public, max-age=31536000, immutable`：
+   换头像/改图生成的是新 key，地址随之变化，不会出现「改了图还看到旧的」。
+9. **回收是尽力而为**：换头像、删动态、撤回图片会顺手删掉旧对象，但只删「库里那个 key
+   确实属于本次操作者」的对象（key 的第一段是上传者 uid）。管理员换掉另一位管理员传的群头像时
+   会跳过，留下一个孤儿对象 —— 这是有意的取舍，宁可不删也不按库里存的地址删别人的图。
+   孤儿不影响功能，只占存储；需要彻底清干净时按日志里的「回收对象失败」人工补删。
+10. **RabbitMQ 队列名固定**（`im.events` / `im.events.q`），多节点自然形成竞争消费，
+    不需要额外配置；`consumer_workers × prefetch` 要按节点数折算总未确认量。
+11. **`mysql.max_open_conns` 要折算**：默认 200 是单节点口径，10 个节点就是 2000 条连接。
 
 ---
 
@@ -237,11 +251,13 @@ mysql -h127.0.0.1 -P13306 -uroot -p imchat < deploy/migrate/20261024-index-refac
 
 | 端点 | 鉴权 | 说明 |
 |---|---|---|
-| `/healthz` | 无 | 并发探测 MySQL 与 Redis（各 1s 超时），返回 `{"status":"ok\|degraded", "mysql":"ok\|down", "redis":"ok\|down"}` |
+| `/healthz` | 无 | 并发探测 MySQL、Redis 与 OSS（各 1s 超时），返回 `{"status":"ok\|degraded", "mysql":"ok\|down", "redis":"ok\|down", "oss":"ok\|down"}` |
 | `/metrics` | 无 | Prometheus 文本格式，见下 |
 | `/debug/pprof/*` | 无 | 仅 `server.pprof=true` 时挂载，生产慎开 |
-| `/uploads/*` | 无 | 静态文件，根目录是 `upload.dir` |
 | `/ws` | 握手参数带令牌 | 浏览器 WS 不能设自定义头，令牌走查询参数 |
+
+图片不走本服务：读取由 CDN 或 bucket 域名直连，后端没有任何静态文件路由，
+也不托管前端页面（前端产物由 nginx 或静态站点托管）。
 
 `/healthz` 的 **HTTP 状态码恒为 200**，是否摘机由负载均衡按 `status` 字段判断：
 依赖抖动时返回 503 会让 LB 反复摘除/加回，比「降级但仍服务」伤害更大。
