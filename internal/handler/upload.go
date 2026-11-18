@@ -38,6 +38,17 @@ var allowedImage = map[string]string{
 // 只做参数校验，字节交给 storage 写：本函数不认识 bucket、endpoint 与签名，
 // 换区域、换桶、将来换别家对象存储都不需要改这里。
 func (r *Router) upload(c *gin.Context) {
+	// 连接级 deadline 与 ctx 超时是两套机制：ctx 只取消业务逻辑，
+	// 而 http.Server 的 ReadTimeout（默认 15s）到时会把连接直接关掉，
+	// 后端连一句「上传超时」都发不出去。10MB 在弱网上 15s 传不完，
+	// 所以按 upload.timeout 重新设一次连接 deadline。
+	// ResponseWriter 不支持时返回 ErrNotSupported（如测试用的 httptest），
+	// 此时靠上面的 ctx 超时兜底，不影响功能。
+	rc := http.NewResponseController(c.Writer)
+	deadline := time.Now().Add(r.cfg.Upload.Timeout.Get())
+	_ = rc.SetReadDeadline(deadline)
+	_ = rc.SetWriteDeadline(deadline)
+
 	limit := int64(r.cfg.Upload.MaxSizeMB) << 20
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, limit+multipartOverhead)
 

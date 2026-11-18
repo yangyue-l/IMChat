@@ -11,7 +11,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -62,9 +64,13 @@ func (f *fakeStorage) Ping(context.Context) error { return nil }
 
 // newUploadRouter 构造只装配了上传依赖的 Router：日志丢给 io.Discard，
 // 上限压到 1MB，让「超限」用例不必真的造一个 10MB 的文件。
+// Timeout 要显式给：真实配置走 applyDefaults，手写的 cfg 不会。
 func newUploadRouter(files storage.Storage) *Router {
 	return &Router{
-		cfg:   &config.Config{Upload: config.UploadConfig{MaxSizeMB: 1}},
+		cfg: &config.Config{Upload: config.UploadConfig{
+			MaxSizeMB: 1,
+			Timeout:   config.Duration(120 * time.Second),
+		}},
 		log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		files: files,
 	}
@@ -206,5 +212,80 @@ func TestUploadReportsStorageFailure(t *testing.T) {
 	}
 	if strings.Contains(body.Msg, "storage") || strings.Contains(body.Msg, "oss") {
 		t.Fatalf("响应泄露了存储细节: %q", body.Msg)
+	}
+}
+
+// delayedReader 在第一次 Read 时先睡一段时间，把请求体拖慢。
+// 用「睡一次」而不是「每次读都睡」：总耗时与客户端的读次数无关，用例才稳定。
+type delayedReader struct {
+	r     io.Reader
+	delay time.Duration
+	once  sync.Once
+}
+
+func (d *delayedReader) Read(p []byte) (int, error) {
+	d.once.Do(func() { time.Sleep(d.delay) })
+	return d.r.Read(p)
+}
+
+// 上传必须自己重设连接级 read deadline。
+//
+// http.Server 的 ReadTimeout 覆盖「读整个请求体」，15s 对 10MB 的弱网上传是不够的；
+// 而请求级 context 超时管不到连接 —— 时间一到标准库直接关连接，后端连一句错误都发不出去。
+// 这里把 ReadTimeout 压到 200ms、把请求体拖到 600ms：只有 handler 里那句
+// ResponseController.SetReadDeadline 生效，请求才可能成功。
+func TestUploadExtendsConnReadDeadline(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	st := &fakeStorage{}
+	r := newUploadRouter(st)
+	r.cfg.Upload.Timeout = config.Duration(3 * time.Second)
+
+	e := gin.New()
+	e.MaxMultipartMemory = 1 << 20
+	e.POST("/upload", func(c *gin.Context) {
+		c.Set(middleware.UIDKey, int64(1001))
+		r.upload(c)
+	})
+
+	srv := httptest.NewUnstartedServer(e)
+	srv.Config.ReadTimeout = 200 * time.Millisecond
+	srv.Start()
+	defer srv.Close()
+
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	part, err := w.CreateFormFile("file", "a.png")
+	if err != nil {
+		t.Fatalf("构造 multipart 失败: %v", err)
+	}
+	if _, err := part.Write([]byte("img")); err != nil {
+		t.Fatalf("写入文件内容失败: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("关闭 multipart 失败: %v", err)
+	}
+
+	// 用 io.Reader 而不是 *bytes.Buffer，让 transport 走分块传输，
+	// 这样 delayedReader 的第一次 Read 才真的发生在发 body 的时候。
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/upload",
+		&delayedReader{r: bytes.NewReader(buf.Bytes()), delay: 600 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("构造请求失败: %v", err)
+	}
+	req.Header.Set("Content-Type", w.FormDataContentType())
+
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("慢速上传应当成功（连接 deadline 未被延长？）: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("状态码 = %d，期望 200，响应 %s", resp.StatusCode, body)
+	}
+	if len(st.put) != 1 {
+		t.Fatalf("应当写入一次对象，实际 %d 次", len(st.put))
 	}
 }

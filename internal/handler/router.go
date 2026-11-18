@@ -56,7 +56,16 @@ func NewRouter(cfg *config.Config, svc *service.Services, jwtMgr *jwt.Manager,
 
 	engine := gin.New()
 	engine.Use(middleware.Recovery(log), middleware.AccessLog(log), middleware.CORS())
-	engine.Use(middleware.Timeout(cfg.Server.WriteTimeout.Get()))
+
+	// 上传的文件不留在内存：gin 默认 MaxMultipartMemory 是 32MB，
+	// 每个并发上传都能占住一份接近文件大小的内存，几十个人同时发图就是 GB 级尖峰。
+	// 降到 1MB，超过的部分由标准库落到临时文件（请求结束时自动清理），
+	// 代价是一次 10MB 的磁盘写入，换来内存占用不随文件大小增长。
+	engine.MaxMultipartMemory = 1 << 20
+
+	// 请求超时不再全局挂：上传要传的是真实字节，和普通接口不是一个量级，
+	// 全局 15s 会把「网速慢」误判成「接口挂了」。改为每个分组自己声明预算。
+	apiTimeout := middleware.Timeout(cfg.Server.WriteTimeout.Get())
 
 	// 健康检查与运维接口，不参与限流
 	engine.GET("/healthz", r.healthz)
@@ -88,7 +97,7 @@ func NewRouter(cfg *config.Config, svc *service.Services, jwtMgr *jwt.Manager,
 		// service 层的失败锁定是按账号的，换个用户名就能绕过，撞库的真正兜底在 IP。
 		// 走 Redis 滑动窗口，多节点共享同一份配额。
 		pub := api.Group("")
-		pub.Use(r.limiter.ByIP(r.ruleAuth()))
+		pub.Use(apiTimeout, r.limiter.ByIP(r.ruleAuth()))
 		{
 			pub.POST("/auth/register", r.register)
 			pub.POST("/auth/login", r.login)
@@ -96,7 +105,7 @@ func NewRouter(cfg *config.Config, svc *service.Services, jwtMgr *jwt.Manager,
 
 		// 读接口：进程内令牌桶，高频、无副作用，不值得为它加一次 Redis 往返
 		read := api.Group("")
-		read.Use(middleware.Auth(jwtMgr, c), r.limiter.ByUID(r.ruleRead()))
+		read.Use(apiTimeout, middleware.Auth(jwtMgr, c), r.limiter.ByUID(r.ruleRead()))
 		{
 			read.GET("/users/me", r.me)
 			read.GET("/users/search", r.searchUsers)
@@ -126,7 +135,7 @@ func NewRouter(cfg *config.Config, svc *service.Services, jwtMgr *jwt.Manager,
 		// 写接口：独立且更严的档位。发消息、发动态、上传是真正会被放大的写路径，
 		// 与读共用一个桶会让刷屏额度白白吃掉正常读请求的配额。
 		write := api.Group("")
-		write.Use(middleware.Auth(jwtMgr, c), r.limiter.ByUID(r.ruleWrite()))
+		write.Use(apiTimeout, middleware.Auth(jwtMgr, c), r.limiter.ByUID(r.ruleWrite()))
 		{
 			write.POST("/auth/logout", r.logout)
 			write.PATCH("/users/me", r.updateProfile)
@@ -160,9 +169,16 @@ func NewRouter(cfg *config.Config, svc *service.Services, jwtMgr *jwt.Manager,
 			write.DELETE("/moments/:moment_id/like", r.unlikeMoment)
 			write.POST("/moments/:moment_id/comments", r.addComment)
 			write.DELETE("/moments/comments/:comment_id", r.deleteComment)
+		}
 
-			// 上传最贵：一次请求要落磁盘。除了写档，再叠一档单用户上传配额
-			write.POST("/upload", r.limiter.ByUID(r.ruleUpload()), r.upload)
+		// 上传单独成组：它需要比普通接口长得多的预算（10MB 在弱网上不是 15s 能传完的）。
+		// 鉴权与写档限流与其它写接口一致，只把超时换成 upload.timeout；
+		// 另叠一档单用户上传配额，挡住同一个账号反复灌图。
+		up := api.Group("")
+		up.Use(middleware.Timeout(cfg.Upload.Timeout.Get()), middleware.Auth(jwtMgr, c),
+			r.limiter.ByUID(r.ruleWrite()), r.limiter.ByUID(r.ruleUpload()))
+		{
+			up.POST("/upload", r.upload)
 		}
 	}
 
