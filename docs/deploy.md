@@ -68,8 +68,8 @@ mysql -h127.0.0.1 -P13306 -uroot -p imchat < deploy/migrate/20261024-index-refac
 |---|---|---|---|
 | `addr` | `:8080` | 非空，合法监听地址 | HTTP 与 WebSocket 共用同一个端口 |
 | `mode` | `debug` | `debug` / `release` | `debug` 开 gin 调试输出；`release` 时日志走 JSON |
-| `read_timeout` | `15s` | 正时长 | `http.Server.ReadTimeout` |
-| `write_timeout` | `15s` | 正时长 | `http.Server.WriteTimeout`，**同时**用作请求级 context 超时 |
+| `read_timeout` | `15s` | 正时长 | `http.Server.ReadTimeout`，覆盖读请求体的全过程；上传路由会在 handler 里按 `upload.timeout` 重设连接 deadline |
+| `write_timeout` | `15s` | 正时长 | `http.Server.WriteTimeout`，**同时**用作普通接口的请求级 context 超时；`/upload` 用 `upload.timeout` 另算，`/ws` 不设（长连接） |
 | `ws_ping_interval` | `30s` | 正时长 | 服务端心跳间隔 |
 | `ws_pong_wait` | `75s` | 正时长，**必须大于** `ws_ping_interval` | 读超时，漏收 Pong 超过它即判连接死亡；配成小于等于心跳间隔会让连接建好即被判死，启动期直接报错 |
 | `ws_write_wait` | `10s` | 正时长（> 0） | 单帧写超时，为 0 时每一帧（含心跳）都立刻超时 |
@@ -151,9 +151,11 @@ mysql -h127.0.0.1 -P13306 -uroot -p imchat < deploy/migrate/20261024-index-refac
 | `jwt.expire` | `168h` | 正时长 | 令牌有效期 |
 | `jwt.issuer` | `imchat` | 非空字符串 | 签发者，解析时校验 |
 | `upload.max_size_mb` | `10` | `1`~`100` | 单文件上限。负数会被标准库当成 0 而上传播失败，过大则单请求就吃满内存与带宽 |
+| `upload.timeout` | `120s` | 正时长 | 单次上传的请求预算，与 `server.write_timeout` 分开。10MB 在 1.4Mbps 上要 60s，用普通接口的 15s 会让弱网用户稳定上传失败 |
 | `upload.public_base` | 空 | `http(s)://` 开头的绝对地址 | 图片对外前缀。留空按 `https://{bucket}.{endpoint}` 推导；写成裸域名会被前端当成相对路径，图片静默 404 |
 | `upload.oss.endpoint` | 无 | 必填 | bucket 所在区域的访问域名，不带 bucket 前缀，协议头可省略（缺省按 https） |
 | `upload.oss.bucket` | 无 | 必填 | 桶名 |
+| `upload.oss.acl` | 空 | `private` / `public-read` / `public-read-write` / `default` | 写入对象的 ACL。留空表示不设，跟随桶的默认策略；**桶是私有的、图片又要按 URL 直读时必须填 `public-read`**，否则上传成功但地址是 403 |
 | `upload.oss.access_key_id` / `access_key_secret` | 无 | 必填 | RAM 用户凭据，最小权限只需 `oss:PutObject` / `oss:GetObject`；**不要写进 yaml**，走环境变量 |
 | `message.recall_window` | `2m` | 非负时长 | 撤回自己的消息的时间窗，负数启动即报错 |
 
@@ -180,6 +182,7 @@ mysql -h127.0.0.1 -P13306 -uroot -p imchat < deploy/migrate/20261024-index-refac
 | `IMCHAT_OSS_BUCKET` | `upload.oss.bucket` |
 | `IMCHAT_OSS_ACCESS_KEY_ID` | `upload.oss.access_key_id` |
 | `IMCHAT_OSS_ACCESS_KEY_SECRET` | `upload.oss.access_key_secret` |
+| `IMCHAT_OSS_ACL` | `upload.oss.acl` |
 
 加载顺序是 **YAML → 代码默认值 → 环境变量 → 校验**：
 
@@ -275,6 +278,12 @@ mysql -h127.0.0.1 -P13306 -uroot -p imchat < deploy/migrate/20261024-index-refac
 | `imchat_goroutines` | gauge | goroutine 数量 |
 | `imchat_heap_alloc_bytes` | gauge | 堆内存占用 |
 | `imchat_gc_count_total` | counter | GC 次数 |
+| `imchat_upload_success_total` | counter | 累计写入对象存储成功的图片数 |
+| `imchat_upload_failed_total` | counter | 累计写入对象存储失败的图片数（参数校验失败不计入） |
+| `imchat_upload_bytes_total` | counter | 累计写入对象存储的图片字节数 |
+
+上传三个指标只数「真正进了存储层」的那一步：格式、大小这类参数校验失败不算，
+否则用户乱传文件时失败率会飙升，把真正的存储故障淹掉。
 
 `imchat_build_info` 把版本放在标签而不是指标名里，升级不会产生新的时间序列，
 `count by (version) (imchat_build_info)` 就能直接查出「现在在跑的都有哪些版本」，
@@ -304,6 +313,8 @@ mysql -h127.0.0.1 -P13306 -uroot -p imchat < deploy/migrate/20261024-index-refac
 | `rabbitmq.consumer_workers 取值 0~32（0 表示未填，默认 3），当前 N` | 每个 worker 独占一条 channel，配几百个会打爆 broker | 按 CPU 与消息量取 3~8 |
 | `ratelimit 启用 distributed 时 write 的 limit/window 必须为正数` | 开了 `distributed` 却把窗口或配额留成 0 | 两对 `limit`/`window` 都要填正数 |
 | `upload.max_size_mb 取值 1~100，当前 N` | 负数会被 `http.MaxBytesReader` 当成 0 上限，所有上传都失败 | 按图片场景取 `5`~`20` |
+| `upload.timeout 必须为正数，当前 …` | 配成 `0s` 或负数，上传请求一开始就超时 | 填正时长，弱网场景不低于 `60s` |
+| `upload.oss.acl 只能是 private / public-read / …，当前 …` | ACL 写成了 `public`、`PublicRead` 这类非 OSS 枚举值 | 用 OSS 的四种取值之一，或留空跟随桶策略 |
 | `message.recall_window 不能为负数，当前 …` | 笔误（`-2m`） | 改为正时长 |
 | `配置时长 "30" 非法` | 时长漏了单位 | 写 `30s` / `1m` / `1h` |
 | `初始化雪花节点失败` | `-node` 超出 `0~1023` | 改到合法区间，并保证集群内唯一 |

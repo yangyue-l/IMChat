@@ -356,9 +356,13 @@ go tool pprof http://127.0.0.1:8080/debug/pprof/profile?seconds=30
 - **优雅停机**：先 `server.Shutdown` 停止新请求 → 断开所有 WS → 停止消费 → 关闭连接。
 - **健康检查** `/healthz` 并发探测 MySQL、Redis 与 OSS（各 1s 超时），任一不可用即
   `status=degraded`，但 HTTP 仍返回 200 —— 是否摘机由负载均衡按 `status` 判断，
-  避免依赖抖动引发摘除/加回的风暴。
+  避免依赖抖动引发摘除/加回的风暴。OSS 探测结果缓存 10s 并做单飞：负载均衡每隔几秒
+  拉一次，实例一多就是成倍的 HEAD 请求，而 SDK 不接 context，探测跑在独立 goroutine 里，
+  调用方只等到自己的 1s，不跟着 SDK 的 70s 超时一起卡。
 - **超时全覆盖**：`http.Server` 的 ReadHeader/Read/Write/Idle 全设，请求级 context 超时，
-  MQ 消费与 Redis 操作都有独立超时。
+  MQ 消费与 Redis 操作都有独立超时。上传单独一档（`upload.timeout`）：它要传的是真实的
+  10MB 字节，与普通接口的 15s 不是一个量级，还会用 `ResponseController` 改写连接 deadline，
+  否则 `server.read_timeout` 一到连接就被标准库关掉，后端连错误响应都发不出去。
 - **panic 兜底**：中间件捕获并转 500，进程不退出。
 - **慢连接保护**：单连接发送队列满即断开该连接，并计入 `imchat_frames_dropped_total`。
   丢弃只记「队列满」一种：触发丢弃的同时就关连接，所以每条连接最多贡献 1 次，

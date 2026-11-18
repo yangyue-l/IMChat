@@ -429,6 +429,10 @@ Redis 不可用时该接口返回 `total: 0` + 空列表并记 Warn，不返回�
 `multipart/form-data`，字段名 `file`。支持 jpg/png/gif/webp，默认上限 10MB。
 返回 `{ "key": "u/1001/2026/11/18/xxx.png", "url": "https://cdn.example.com/u/1001/2026/11/18/xxx.png", "size": 12345 }`。
 
+单次上传的预算由 `upload.timeout`（默认 `120s`）决定，**不**沿用普通接口的 15s：
+10MB 在 1.4Mbps 上行下就要 60s。超过预算后连接会被关掉，客户端看到的是网络错误，
+而不是一个 JSON 错误体 —— 所以前端应自己设一个比它短的超时（建议 `60s`）并提示重试。
+
 返回的 `url` 是**完整的绝对地址**（对象存储或 CDN），前端可以直接当 `<img src>` 用，
 不需要再拼任何前缀。
 
