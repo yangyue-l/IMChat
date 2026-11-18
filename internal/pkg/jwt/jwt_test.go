@@ -117,7 +117,7 @@ func TestParseRejectsForgedOrMalformedTokens(t *testing.T) {
 	if len(parts) != 3 {
 		t.Fatalf("令牌不是三段式: %q", legit)
 	}
-	tampered := parts[0] + "." + parts[1] + "." + flipLastRune(parts[2])
+	tampered := parts[0] + "." + parts[1] + "." + flipSignatureRune(parts[2])
 
 	foreignIssuer := validClaims(time.Hour)
 	foreignIssuer.Issuer = "someone-else"
@@ -177,13 +177,18 @@ func TestParseRejectsNonPositiveUserID(t *testing.T) {
 
 // flipLastRune 把签名末尾的字符换掉一位，保持长度与字符集不变，
 // 这样校验失败发生在验签而不是 base64 解码，才真正测到签名比对。
-func flipLastRune(s string) string {
+// flipSignatureRune 改掉签名段的**第一个**字符，造一个验签必然失败的令牌。
+//
+// 不能改最后一个字符：HMAC-SHA256 的 32 字节签名编成 43 个 base64 字符，
+// 末位只承载 4 个有效位、低 2 位是填充。末位从 'A'(0) 翻成 'B'(1) 解码出来
+// 的字节完全一样，令牌照样验签通过 —— 而 claims 里带 IssuedAt，签名每次都不同，
+// 末位恰好是 'A' 时用例就随机变红（约 1/16）。首位承载完整的 6 位，翻了一定会变。
+func flipSignatureRune(s string) string {
 	if s == "" {
 		return s
 	}
-	last := s[len(s)-1]
-	if last == 'A' {
-		return s[:len(s)-1] + "B"
+	if s[0] == 'A' {
+		return "B" + s[1:]
 	}
-	return s[:len(s)-1] + "A"
+	return "A" + s[1:]
 }
