@@ -62,6 +62,9 @@ mysql -h127.0.0.1 -P13306 -uroot -p imchat < deploy/migrate/20261024-index-refac
 **布尔开关没有默认值**：`enabled`、`pprof`、`auto_migrate`、`distributed` 不写就是 `false`，
 这与「写了 `false`」等价，不存在「未填」这一状态。
 
+`server.metrics` 是唯一的例外：**不写视为开启**。这个端点默认必须暴露，否则老配置
+升级后会因为缺字段静默失去全部指标；字段声明成 `*bool` 正是为了区分「没写」与「写了 false」。
+
 ### server
 
 | 配置项 | 默认值 | 取值范围 | 说明 |
@@ -76,6 +79,7 @@ mysql -h127.0.0.1 -P13306 -uroot -p imchat < deploy/migrate/20261024-index-refac
 | `ws_send_buffer` | `512` | 正整数 | 单连接发送队列长度，满即断开该连接 |
 | `graceful_timeout` | `15s` | 正时长 | 停机总预算，见第六节 |
 | `pprof` | `false` | 布尔 | 打开才挂载 `/debug/pprof` |
+| `metrics` | **`true`** | 布尔 | 不写即暴露 `/metrics`；显式写 `false` 才关，关掉后该路径返回 404 |
 
 ### mysql
 
@@ -255,7 +259,7 @@ mysql -h127.0.0.1 -P13306 -uroot -p imchat < deploy/migrate/20261024-index-refac
 | 端点 | 鉴权 | 说明 |
 |---|---|---|
 | `/healthz` | 无 | 并发探测 MySQL、Redis 与 OSS（各 1s 超时），返回 `{"status":"ok\|degraded", "mysql":"ok\|down", "redis":"ok\|down", "oss":"ok\|down"}` |
-| `/metrics` | 无 | Prometheus 文本格式，见下 |
+| `/metrics` | 无 | Prometheus 文本格式，见下；`server.metrics=false` 时整条路由不注册 |
 | `/debug/pprof/*` | 无 | 仅 `server.pprof=true` 时挂载，生产慎开 |
 | `/ws` | 握手参数带令牌 | 浏览器 WS 不能设自定义头，令牌走查询参数 |
 
@@ -283,6 +287,11 @@ mysql -h127.0.0.1 -P13306 -uroot -p imchat < deploy/migrate/20261024-index-refac
 
 上传三个指标只数「真正进了存储层」的那一步：格式、大小这类参数校验失败不算，
 否则用户乱传文件时失败率会飙升，把真正的存储故障淹掉。
+
+关掉用 `server.metrics: false`，路由不注册、请求直接 404 —— 返回 404 而不是空响应，
+是为了把「配错了」和「抓到了空数据」区分开。这个端点与 `/healthz` 一样不鉴权，
+公网暴露等于把 goroutine 数、堆内存、上传总量这些内部状态交出去，入口处要么按
+路径拦截，要么显式关闭。
 
 多节点部署时这些是**单节点**视角的值，监控侧按实例聚合，不要按集群求和后看绝对值。
 

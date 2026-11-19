@@ -115,7 +115,7 @@ go run ./cmd/smoke -base http://127.0.0.1:8080 -cluster-base http://127.0.0.1:80
 |---|---|
 | `http://127.0.0.1:8080/` | 演示前端 |
 | `http://127.0.0.1:8080/healthz` | 健康检查 |
-| `http://127.0.0.1:8080/metrics` | Prometheus 指标 |
+| `http://127.0.0.1:8080/metrics` | Prometheus 指标（`server.metrics: false` 可关） |
 | `http://127.0.0.1:8080/debug/pprof/` | 性能分析 |
 | `http://127.0.0.1:15672/` | RabbitMQ 管理台（imchat / imchat123456） |
 
