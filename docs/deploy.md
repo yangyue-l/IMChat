@@ -335,3 +335,43 @@ mysql -h127.0.0.1 -P13306 -uroot -p imchat < deploy/migrate/20261024-index-refac
 
 `consumer_workers` 的 `0` 表示「没填」，由 `applyDefaults` 归一成默认的 3，
 只有负数与大于 32 才会被拦下 —— 报错文案按这个真实范围写。
+
+---
+
+## 九、容器化
+
+根目录的 `Dockerfile` 是多阶段构建：`golang:1.26-alpine` 编出 `CGO_ENABLED=0` 的静态二进制，
+运行层用 `alpine`，装了 `ca-certificates`（调 OSS 的 HTTPS 需要根证书）与 `tzdata`
+（DSN 用 `loc=Local`，缺了时间偏 8 小时），并以 uid 10001 的非 root 用户运行，产物约 62MB。
+
+```bash
+docker build -t imchat:latest .
+```
+
+```bash
+docker run -d --name imchat -p 8080:8080 --stop-timeout 30 \
+  -e IMCHAT_MYSQL_DSN='root:root123456@tcp(mysql:3306)/imchat?charset=utf8mb4&parseTime=True&loc=Local' \
+  -e IMCHAT_REDIS_ADDR=redis:6379 \
+  -e IMCHAT_RABBITMQ_URL='amqp://imchat:imchat123456@rabbitmq:5672/' \
+  -e IMCHAT_OSS_BUCKET=your-bucket \
+  -e IMCHAT_OSS_ACCESS_KEY_ID=... \
+  -e IMCHAT_OSS_ACCESS_KEY_SECRET=... \
+  imchat:latest
+```
+
+四个必踩的点：
+
+1. **镜像里的 `config.yaml` 是本地开发配置**（`127.0.0.1:13306`）。容器里必须用
+   `IMCHAT_MYSQL_DSN` / `IMCHAT_REDIS_ADDR` / `IMCHAT_RABBITMQ_URL` 覆盖成服务名，
+   否则会连到容器自己的回环地址，报 `connection refused`。
+2. **`.env` 不进镜像**（`.dockerignore` 已排除）。凭据走 `-e` 或 `--env-file`，
+   后者的格式与 `.env` 相同，可以直接复用同一个文件。
+3. **优雅停机**：`graceful_timeout` 默认 `15s`，而 Docker 默认在 `SIGTERM` 后 10s 就发
+   `SIGKILL`。要显式给 `--stop-timeout 30`（compose 里是 `stop_grace_period: 30s`），
+   否则连接会被硬切，客户端看到的是「连接异常断开」而不是正常关闭。
+4. **`HEALTHCHECK` 探的是 `/healthz`，它永远返回 200**：只反映进程还能响应 HTTP，
+   抓的是死锁、goroutine 泄漏这类假活；依赖可用性在响应体里，DB 挂了不会变成 unhealthy
+   —— 那种情况重启容器也解决不了。
+
+构建阶段在容器内跑 `go mod download`，没有本机的 `GOPROXY` 配置，所以 Dockerfile 默认给了
+`goproxy.cn`；在海外构建时用 `--build-arg GOPROXY=` 覆盖成空即可走官方源。
