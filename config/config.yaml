@@ -94,16 +94,8 @@ upload:
   public_base: ""
   oss:
     # bucket 所在区域的访问域名，不带 bucket 前缀；协议头可省略，缺省 https。
-    endpoint: "oss-cn-hangzhou.aliyuncs.com"
-    bucket: ""
-    # 写入对象的 ACL：private | public-read | public-read-write | default。
-    # 留空表示不显式设置，跟随桶的默认策略；桶是私有的又要按 URL 直读图片时
-    # 必须填 public-read，否则上传成功但地址是 403。
-    acl: ""
-    # 密钥不要写在这里（本文件进仓库），从环境变量注入：
-    #   IMCHAT_OSS_ACCESS_KEY_ID / IMCHAT_OSS_ACCESS_KEY_SECRET
-    access_key_id: ""
-    access_key_secret: ""
+    # 默认华北2（北京），换区域才需要改这里。
+    endpoint: "oss-cn-beijing.aliyuncs.com"
 
 message:
   # 撤回时间窗，只约束「撤回自己发的消息」；群管理员撤回他人消息不受此限制。

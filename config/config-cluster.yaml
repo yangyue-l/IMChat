@@ -90,10 +90,7 @@ upload:
   # 图片对外访问前缀：接了 CDN 就填 CDN 域名，留空按 https://{bucket}.{endpoint} 推导。
   public_base: ""
   oss:
-    endpoint: "oss-cn-hangzhou.aliyuncs.com"
-    bucket: ""
-    # private | public-read | public-read-write | default；留空跟随桶默认策略
-    acl: ""
-    # 密钥从 IMCHAT_OSS_ACCESS_KEY_ID / IMCHAT_OSS_ACCESS_KEY_SECRET 注入
-    access_key_id: ""
-    access_key_secret: ""
+    endpoint: "oss-cn-beijing.aliyuncs.com"
+    # bucket / 凭据 / ACL 不写在这里：由 .env 或环境变量注入（见 .env.example）
+    #   IMCHAT_OSS_BUCKET / IMCHAT_OSS_ACCESS_KEY_ID / IMCHAT_OSS_ACCESS_KEY_SECRET
+    #   IMCHAT_OSS_ACL  取值 private | public-read | public-read-write | default
