@@ -75,7 +75,11 @@ func NewRouter(cfg *config.Config, svc *service.Services, jwtMgr *jwt.Manager,
 
 	// 健康检查与运维接口，不参与限流
 	engine.GET("/healthz", r.healthz)
-	engine.GET("/metrics", r.metrics)
+	// /metrics 默认开启，只有显式配 metrics: false 才不注册 —— 关掉之后是 404，
+	// 不是空响应，这样「配错了」和「抓到了空数据」能区分开。
+	if cfg.Server.MetricsEnabled() {
+		engine.GET("/metrics", r.metrics)
+	}
 
 	// WebSocket 握手：鉴权在 handler 内完成（浏览器 WS 无法设置自定义头）。
 	// 握手本身是连接数放大器，按 IP 限流挡住反复建连。

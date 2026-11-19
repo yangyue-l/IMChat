@@ -53,6 +53,17 @@ type ServerConfig struct {
 	WSSendBuffer    int      `yaml:"ws_send_buffer"`
 	GracefulTimeout Duration `yaml:"graceful_timeout"`
 	Pprof           bool     `yaml:"pprof"`
+	// Metrics 控制是否暴露 /metrics。用指针而不是 bool：要区分「没写」与
+	// 「显式写 false」，而 bool 的零值和「未配置」长得一样。
+	Metrics *bool `yaml:"metrics"`
+}
+
+// MetricsEnabled 报告是否暴露 /metrics。
+//
+// 未配置视为开启 —— 监控是默认能力，关掉必须是显式决定。否则老配置升级后
+// 会因为缺这个字段静默失去全部指标，那比这里多一个特例严重得多。
+func (s ServerConfig) MetricsEnabled() bool {
+	return s.Metrics == nil || *s.Metrics
 }
 
 type MySQLConfig struct {

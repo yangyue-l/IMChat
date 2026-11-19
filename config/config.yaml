@@ -9,6 +9,7 @@ server:
   ws_send_buffer: 512    # 单连接发送队列长度，满了触发背压丢弃
   graceful_timeout: 15s
   pprof: true            # 是否挂载 /debug/pprof
+  metrics: true          # 是否暴露 /metrics，不写也默认开启
 
 mysql:
   # 容器映射到 3307，避免与本机已有 MySQL 冲突

@@ -175,6 +175,7 @@ func TestLoadAppliesDefaults(t *testing.T) {
 		{"server.ws_write_wait", cfg.Server.WSWriteWait.Get(), 10 * time.Second},
 		{"server.ws_send_buffer", cfg.Server.WSSendBuffer, 512},
 		{"server.graceful_timeout", cfg.Server.GracefulTimeout.Get(), 15 * time.Second},
+		{"server.metrics", cfg.Server.MetricsEnabled(), true},
 
 		{"mysql.max_idle_conns", cfg.MySQL.MaxIdleConns, 20},
 		{"mysql.max_open_conns", cfg.MySQL.MaxOpenConns, 200},
@@ -233,6 +234,37 @@ func TestLoadAppliesDefaults(t *testing.T) {
 		if !reflect.DeepEqual(c.got, c.want) {
 			t.Errorf("%s 期望 %v，实际 %v", c.name, c.want, c.got)
 		}
+	}
+}
+
+// TestMetricsEnabled 钉住 /metrics 开关的语义。
+//
+// 它是配置里唯一「不写即开启」的布尔项：缺省必须暴露，否则老配置升级后会静默
+// 失去全部指标。bool 的零值区分不了「没写」与「写了 false」，所以字段用 *bool。
+func TestMetricsEnabled(t *testing.T) {
+	yes, no := true, false
+	for _, c := range []struct {
+		name string
+		in   *bool
+		want bool
+	}{
+		{"未配置", nil, true},
+		{"显式开启", &yes, true},
+		{"显式关闭", &no, false},
+	} {
+		if got := (ServerConfig{Metrics: c.in}).MetricsEnabled(); got != c.want {
+			t.Errorf("%s：MetricsEnabled() = %v，期望 %v", c.name, got, c.want)
+		}
+	}
+
+	// 再走一遍 yaml 解析：*bool 的反序列化是这次新增的风险点。
+	clearEnv(t)
+	cfg, err := Load(writeConfig(t, minimalYAML+"server:\n  metrics: false\n"))
+	if err != nil {
+		t.Fatalf("加载配置失败: %v", err)
+	}
+	if cfg.Server.MetricsEnabled() {
+		t.Fatal("yaml 里写 metrics: false 之后仍视为开启")
 	}
 }
 
