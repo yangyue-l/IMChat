@@ -9,12 +9,10 @@ import (
 	"net/http/pprof"
 	"runtime"
 	"strconv"
-	"strings"
 	"sync/atomic"
 
 	"github.com/gin-gonic/gin"
 
-	"imchat/internal/buildinfo"
 	"imchat/internal/cache"
 	"imchat/internal/config"
 	"imchat/internal/middleware"
@@ -244,7 +242,6 @@ func (r *Router) metrics(c *gin.Context) {
 	runtime.ReadMemStats(&m)
 
 	c.Header("Content-Type", "text/plain; version=0.0.4")
-	writeBuildInfo(c)
 	writeMetric(c, "imchat_online_connections", "当前在线连接数", metricGauge, float64(r.hub.OnlineCount()))
 	writeMetric(c, "imchat_frames_received_total", "累计接收的上行帧数", metricCounter, float64(r.hub.RecvFrames()))
 	writeMetric(c, "imchat_frames_sent_total", "累计写出的下行帧数", metricCounter, float64(r.hub.SentFrames()))
@@ -255,32 +252,6 @@ func (r *Router) metrics(c *gin.Context) {
 	writeMetric(c, "imchat_upload_success_total", "累计写入对象存储成功的图片数", metricCounter, float64(r.uploadOK.Load()))
 	writeMetric(c, "imchat_upload_failed_total", "累计写入对象存储失败的图片数", metricCounter, float64(r.uploadFailed.Load()))
 	writeMetric(c, "imchat_upload_bytes_total", "累计写入对象存储的图片字节数", metricCounter, float64(r.uploadBytes.Load()))
-}
-
-// writeBuildInfo 输出版本信息。
-//
-// Info 类指标的惯例是「值恒为 1、信息全放 label」：版本升级只改标签值，
-// 时间序列仍是同一条，`count by (version)` 就能直接查出「现在在跑的都有
-// 哪些版本」。把版本塞进 HELP 或指标名都会让这个聚合失效。
-func writeBuildInfo(c *gin.Context) {
-	const name = "imchat_build_info"
-	c.Writer.WriteString("# HELP " + name + " 构建信息，值恒为 1，版本与提交号见标签\n")
-	c.Writer.WriteString("# TYPE " + name + " gauge\n")
-	c.Writer.WriteString(name +
-		`{version="` + escapeLabel(buildinfo.Version) +
-		`",commit="` + escapeLabel(buildinfo.Commit) +
-		`",dirty="` + strconv.FormatBool(buildinfo.Dirty()) + `"} 1` + "\n")
-}
-
-// escapeLabel 转义标签值里的反斜杠、双引号与换行。
-//
-// version 由 git describe 生成，正常不含这些字符，但一个意外字符就能让整行
-// 变成非法文本、整个 /metrics 抓取失败；指标服务不该被这种输入打挂。
-func escapeLabel(v string) string {
-	if !strings.ContainsAny(v, "\\\"\n") {
-		return v
-	}
-	return strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`).Replace(v)
 }
 
 func writeMetric(c *gin.Context, name, help, typ string, value float64) {

@@ -15,7 +15,6 @@ import (
 	"syscall"
 	"time"
 
-	"imchat/internal/buildinfo"
 	"imchat/internal/cache"
 	"imchat/internal/config"
 	"imchat/internal/handler"
@@ -184,7 +183,6 @@ func run(configPath string, nodeID int64) error {
 	errCh := make(chan error, 1)
 	go func() {
 		log.Info("服务已启动", "addr", cfg.Server.Addr, "node", nodeTag,
-			"version", buildinfo.Version, "commit", buildinfo.Commit,
 			"mq", cfg.RabbitMQ.Enabled, "cluster", cfg.Cluster.Enabled, "pprof", cfg.Server.Pprof)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err

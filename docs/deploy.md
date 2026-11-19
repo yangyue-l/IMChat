@@ -270,7 +270,6 @@ mysql -h127.0.0.1 -P13306 -uroot -p imchat < deploy/migrate/20261024-index-refac
 
 | 指标 | 类型 | 含义 |
 |---|---|---|
-| `imchat_build_info` | gauge | 构建信息，值恒为 1，版本在 `version` / `commit` / `dirty` 三个标签里 |
 | `imchat_online_connections` | gauge | 本节点当前在线连接数 |
 | `imchat_frames_received_total` | counter | 累计接收的上行帧数 |
 | `imchat_frames_sent_total` | counter | 累计写出的下行帧数 |
@@ -284,14 +283,6 @@ mysql -h127.0.0.1 -P13306 -uroot -p imchat < deploy/migrate/20261024-index-refac
 
 上传三个指标只数「真正进了存储层」的那一步：格式、大小这类参数校验失败不算，
 否则用户乱传文件时失败率会飙升，把真正的存储故障淹掉。
-
-`imchat_build_info` 把版本放在标签而不是指标名里，升级不会产生新的时间序列，
-`count by (version) (imchat_build_info)` 就能直接查出「现在在跑的都有哪些版本」，
-滚动发布卡在哪个版本一眼可见。`version` 来自 `git describe --tags --always --dirty`，
-`dirty="true"` 表示打包时工作区还有未提交改动 —— 这种构建不该进生产。
-
-只有 `make build` 会注入版本；`go run` 或 IDE 直接构建拿到的是 `version="dev"`、
-`commit="none"`，看到这两个值就说明二进制不是正式产物。
 
 多节点部署时这些是**单节点**视角的值，监控侧按实例聚合，不要按集群求和后看绝对值。
 
