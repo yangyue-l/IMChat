@@ -236,8 +236,9 @@ IMChat/
 
 ## 五、配置说明
 
-`config/config.yaml` 中除了凭据类必填项（MySQL DSN、Redis 地址、JWT 密钥、OSS 凭据）之外都有合理默认值，
-最常改的几项可用环境变量覆盖：
+`config/config.yaml` 里的值都是本地开发可直接用的默认配置，只有 OSS 的桶名与密钥必须自己提供。
+本地把它们写进项目根目录的 `.env`（模板见 `.env.example`），容器部署走环境变量注入，
+两种方式的优先级都高于 yaml。最常改的几项：
 
 | 环境变量 | 对应配置 |
 |---|---|
@@ -252,7 +253,9 @@ IMChat/
 | `IMCHAT_OSS_BUCKET` | `upload.oss.bucket` |
 | `IMCHAT_OSS_ACCESS_KEY_ID` | `upload.oss.access_key_id` |
 | `IMCHAT_OSS_ACCESS_KEY_SECRET` | `upload.oss.access_key_secret` |
+| `IMCHAT_OSS_ACL` | `upload.oss.acl` |
 
+加载顺序是 `.env` → YAML → 代码默认值 → 环境变量 → 派生值 → 校验；
 只有字符串项能被环境变量覆盖，数字、布尔、时长只能改配置文件。
 完整配置项（默认值、取值范围）、多节点部署要点与优雅停机顺序见 `docs/deploy.md`。
 
