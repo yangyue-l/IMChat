@@ -176,7 +176,7 @@ type UploadConfig struct {
 // IMCHAT_OSS_ACCESS_KEY_ID / IMCHAT_OSS_ACCESS_KEY_SECRET 注入。
 type OSSConfig struct {
 	// Endpoint 是 bucket 所在区域的访问域名，不带 bucket 前缀，
-	// 形如 oss-cn-hangzhou.aliyuncs.com（协议头可省略，缺省按 https）。
+	// 形如 oss-cn-beijing.aliyuncs.com（协议头可省略，缺省按 https）。
 	Endpoint        string `yaml:"endpoint"`
 	Bucket          string `yaml:"bucket"`
 	AccessKeyID     string `yaml:"access_key_id"`
@@ -213,6 +213,10 @@ type Config struct {
 
 // Load 读取配置文件，随后用 IMCHAT_* 环境变量覆盖关键项，方便容器部署。
 func Load(path string) (*Config, error) {
+	if err := loadDotEnv(dotEnvFile); err != nil {
+		return nil, err
+	}
+
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("读取配置文件 %s 失败: %w", path, err)
