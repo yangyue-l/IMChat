@@ -8,8 +8,13 @@ bin/
 logs/
 *.log
 
-# 本地配置覆盖
+# 本地配置覆盖（不会被自动读取，要 -c config/config-local.yaml 显式指定；
+# 只想改几项值的话用根目录的 .env 更省事）
 config/config-local.yaml
+
+# 本地环境变量（含 OSS 密钥，绝不进版本管理；模板 .env.example 需要提交）
+.env
+.env.local
 
 # 前端依赖（构建产物 web/index.html 需要提交）
 web/node_modules/
