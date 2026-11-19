@@ -1,0 +1,27 @@
+# 构建上下文只需要 Go 源码与 config/，其余一律不传给 daemon。
+# 最关键的两条是 .env 与 config-local.yaml：密钥绝不能进镜像层。
+
+.git
+.github
+.workbuddy
+
+# 编译产物与运行数据
+bin
+*.exe
+*.test
+*.out
+*.log
+logs
+
+# 前端依赖（后端不挂静态资源，也不需要 embed）
+web/node_modules
+
+# 本机配置与密钥
+.env
+.env.local
+.env.*.local
+config/config-local.yaml
+
+# 与镜像内容无关
+deploy
+docs
