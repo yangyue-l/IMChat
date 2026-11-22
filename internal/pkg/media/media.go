@@ -7,6 +7,10 @@
 //
 // 单独成包而不是并进 storage：拼地址是纯字符串运算，model 的 DTO 转换也要用，
 // 而 model 不该为了拼一个 URL 就依赖 OSS SDK。
+//
+// 放在 pkg 下而不是与 cache / storage 并列：这里没有外部依赖，也没有连接与生命周期，
+// 只有一组纯函数加一个装配期注入的前缀，与 jsonx、snowflake 同类。
+// cache / storage / mq / infra 那一层是外部服务适配，会建连、要探活，和它不是一个性质。
 package media
 
 import (
@@ -60,6 +64,7 @@ func URLs(raw []string) []string {
 	}
 	out := make([]string, len(raw))
 	for i := range raw {
+
 		out[i] = URL(raw[i])
 	}
 	return out

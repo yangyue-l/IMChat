@@ -10,7 +10,7 @@ import (
 
 	aliyun "github.com/aliyun/aliyun-oss-go-sdk/oss"
 
-	"imchat/internal/media"
+	"imchat/internal/pkg/media"
 )
 
 const (

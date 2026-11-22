@@ -12,8 +12,8 @@ import (
 	mysqldriver "github.com/go-sql-driver/mysql"
 	"gorm.io/gorm"
 
-	"imchat/internal/media"
 	"imchat/internal/model"
+	"imchat/internal/pkg/media"
 	"imchat/internal/pkg/resp"
 )
 

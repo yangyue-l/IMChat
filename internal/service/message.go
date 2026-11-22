@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"imchat/internal/media"
 	"imchat/internal/model"
+	"imchat/internal/pkg/media"
 	"imchat/internal/pkg/resp"
 )
 

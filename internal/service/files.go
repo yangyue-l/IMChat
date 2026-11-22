@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"time"
 
-	"imchat/internal/media"
+	"imchat/internal/pkg/media"
 )
 
 // objectDropTimeout 是回收对象的独立超时。

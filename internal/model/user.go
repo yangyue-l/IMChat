@@ -3,7 +3,7 @@ package model
 import (
 	"time"
 
-	"imchat/internal/media"
+	"imchat/internal/pkg/media"
 )
 
 // UserStatus 账号状态。

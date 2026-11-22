@@ -12,8 +12,8 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"imchat/internal/cache"
-	"imchat/internal/media"
 	"imchat/internal/model"
+	"imchat/internal/pkg/media"
 	"imchat/internal/pkg/resp"
 )
 

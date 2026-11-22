@@ -3,8 +3,8 @@ package service
 import (
 	"testing"
 
-	"imchat/internal/media"
 	"imchat/internal/model"
+	"imchat/internal/pkg/media"
 )
 
 const testCDN = "https://cdn.example.com"

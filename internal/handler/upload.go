@@ -10,8 +10,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"imchat/internal/media"
 	"imchat/internal/middleware"
+	"imchat/internal/pkg/media"
 	"imchat/internal/pkg/resp"
 	"imchat/internal/storage"
 )

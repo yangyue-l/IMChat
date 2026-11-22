@@ -7,9 +7,9 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	"imchat/internal/media"
 	"imchat/internal/model"
 	"imchat/internal/pkg/jsonx"
+	"imchat/internal/pkg/media"
 	"imchat/internal/pkg/resp"
 )
 

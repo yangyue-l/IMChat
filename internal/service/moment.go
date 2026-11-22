@@ -10,10 +10,9 @@ import (
 
 	"gorm.io/gorm"
 
-	"imchat/internal/media"
 	"imchat/internal/model"
+	"imchat/internal/pkg/media"
 	"imchat/internal/pkg/resp"
-	"imchat/internal/pkg/snowflake"
 )
 
 // MomentService 朋友圈业务。
@@ -520,14 +519,4 @@ func (s *MomentService) assemble(ctx context.Context, viewerID int64, list []mod
 		out = append(out, dto)
 	}
 	return out, nil
-}
-
-// PublishSystemNotice 生成一条系统消息并推送，供群事件等场景复用。
-func (s *MessageService) PublishSystemNotice(ctx context.Context, uids []int64, text string) {
-	if len(uids) == 0 {
-		return
-	}
-	s.deps.Pusher.PushToUsers(uids, NewFrame(FrameNotice, map[string]any{
-		"kind": "system", "text": text, "id": snowflake.Next(),
-	}).Encode())
 }

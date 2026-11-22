@@ -3,7 +3,7 @@ package model
 import (
 	"testing"
 
-	"imchat/internal/media"
+	"imchat/internal/pkg/media"
 )
 
 // TestToPublicResolvesAvatar 锁住用户头像的出站口径。
