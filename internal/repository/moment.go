@@ -131,14 +131,6 @@ func (r *MomentRepo) AddComment(ctx context.Context, c *model.MomentComment) err
 	return r.db.WithContext(ctx).Create(c).Error
 }
 
-// ListComments 查询动态下的评论。
-func (r *MomentRepo) ListComments(ctx context.Context, momentID int64, limit int) ([]model.MomentComment, error) {
-	var list []model.MomentComment
-	err := r.db.WithContext(ctx).Where("moment_id = ?", momentID).
-		Order("id ASC").Limit(limit).Find(&list).Error
-	return list, err
-}
-
 // CommentsByMoments 批量查询评论，避免 N+1。
 func (r *MomentRepo) CommentsByMoments(ctx context.Context, momentIDs []int64, perMoment int) (map[int64][]model.MomentComment, error) {
 	if len(momentIDs) == 0 {

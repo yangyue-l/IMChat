@@ -15,6 +15,28 @@ import (
 	"imchat/internal/config"
 )
 
+// frameKick 是连接层的踢线通知帧类型。
+//
+// 与 service 包里的业务推送帧分开：kick 由连接管理自己产生（同设备顶号、
+// 集群跨节点通知、停机广播），不经过业务推送路径，所以不在那一组常量里。
+const frameKick = "kick"
+
+// kickFrame 构造踢线通知帧。device 为空时不带该字段 —— 顶号与停机只通知原因，
+// 集群广播才需要客户端按 device 判断该断哪一条连接。
+//
+// 三处踢线现场原先各自硬编码整段 JSON，字段一改就漏；收口到这里之后
+// type 只有 frameKick 一个来源。
+func kickFrame(reason, device string) []byte {
+	data := map[string]any{"reason": reason}
+	if device != "" {
+		data["device"] = device
+	}
+	// 全是 string 的 map，Marshal 不会失败；忽略错误是为了让调用点保持一行，
+	// 而不是每处都重复一遍用不到的错误分支。
+	b, _ := json.Marshal(map[string]any{"type": frameKick, "data": data})
+	return b
+}
+
 // shard 是一个连接分片，独立加锁，避免全局锁成为瓶颈。
 type shard struct {
 	mu    sync.RWMutex
@@ -402,13 +424,7 @@ func (h *Hub) KickDevice(uid int64, device string) int {
 		n = 1
 	}
 	if h.clusterEnabled {
-		frame, err := json.Marshal(map[string]any{
-			"type": "kick",
-			"data": map[string]any{"device": device, "reason": "kicked_by_user"},
-		})
-		if err == nil {
-			h.publishBus([]int64{uid}, frame)
-		}
+		h.publishBus([]int64{uid}, kickFrame("kicked_by_user", device))
 	}
 	return n
 }
@@ -561,7 +577,7 @@ func (h *Hub) onlineTTL() time.Duration {
 
 // closeAll 优雅关闭：通知所有连接下线。
 func (h *Hub) closeAll() {
-	frame := []byte(`{"type":"kick","data":{"reason":"server_shutdown"}}`)
+	frame := kickFrame("server_shutdown", "")
 	for _, s := range h.shards {
 		s.mu.RLock()
 		clients := make([]*Client, 0, 64)

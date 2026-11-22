@@ -67,9 +67,3 @@ func (r *UserRepo) UpdateFields(ctx context.Context, id int64, fields map[string
 	}
 	return r.db.WithContext(ctx).Model(&model.User{}).Where("id = ?", id).Updates(fields).Error
 }
-
-// TouchActive 更新活跃时间。高并发下由 service 节流，避免每次请求都写库。
-func (r *UserRepo) TouchActive(ctx context.Context, id int64) error {
-	return r.db.WithContext(ctx).Model(&model.User{}).Where("id = ?", id).
-		UpdateColumn("last_active_at", gorm.Expr("NOW()")).Error
-}

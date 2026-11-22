@@ -2,11 +2,8 @@ package cache
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
-
-	"github.com/redis/go-redis/v9"
 )
 
 // 会话序号、消息幂等、未读计数与已读序号。
@@ -139,13 +136,4 @@ func (c *Cache) SetReadSeqIfAbsent(ctx context.Context, uid int64, convID string
 	pipe.PExpire(ctx, key, readTTL)
 	_, err := pipe.Exec(ctx)
 	return err
-}
-
-// GetReadSeq 读取用户在会话内的已读序号。
-func (c *Cache) GetReadSeq(ctx context.Context, uid int64, convID string) (int64, error) {
-	n, err := c.rdb.HGet(ctx, fmt.Sprintf("%s%d", keyRead, uid), convID).Int64()
-	if errors.Is(err, redis.Nil) {
-		return 0, nil
-	}
-	return n, err
 }

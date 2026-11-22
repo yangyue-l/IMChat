@@ -118,26 +118,6 @@ func (r *MessageRepo) ListConversations(ctx context.Context, uid int64, limit in
 	return list, err
 }
 
-// GetConversation 查询单个会话。
-func (r *MessageRepo) GetConversation(ctx context.Context, uid int64, convID string) (*model.Conversation, error) {
-	var c model.Conversation
-	err := r.db.WithContext(ctx).
-		Where("user_id = ? AND conv_id = ?", uid, convID).Limit(1).Find(&c).Error
-	if err != nil || c.ID == 0 {
-		return nil, err
-	}
-	return &c, nil
-}
-
-// UpdateConversation 局部更新会话设置（置顶、免打扰、清空）。
-func (r *MessageRepo) UpdateConversation(ctx context.Context, uid int64, convID string, fields map[string]any) error {
-	if len(fields) == 0 {
-		return nil
-	}
-	return r.db.WithContext(ctx).Model(&model.Conversation{}).
-		Where("user_id = ? AND conv_id = ?", uid, convID).Updates(fields).Error
-}
-
 // UpsertRead 更新已读位置，只允许前进不允许回退（GREATEST 保证幂等）。
 func (r *MessageRepo) UpsertRead(ctx context.Context, uid int64, convID string, seq int64) error {
 	row := model.ConversationRead{UserID: uid, ConvID: convID, LastReadSeq: seq}
@@ -178,14 +158,6 @@ func (r *MessageRepo) ListReadSeqs(ctx context.Context, uid int64, convIDs []str
 		out[r.ConvID] = r.LastReadSeq
 	}
 	return out, nil
-}
-
-// GetReadSeq 读取已读位置。
-func (r *MessageRepo) GetReadSeq(ctx context.Context, uid int64, convID string) (int64, error) {
-	var row model.ConversationRead
-	err := r.db.WithContext(ctx).
-		Where("user_id = ? AND conv_id = ?", uid, convID).Limit(1).Find(&row).Error
-	return row.LastReadSeq, err
 }
 
 // Recall 撤回消息：仅更新状态，保留行以便客户端展示"已撤回"。

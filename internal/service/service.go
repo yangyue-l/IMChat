@@ -169,6 +169,9 @@ func GroupID(convID string) (int64, bool) {
 }
 
 // 推送帧类型，前端据此分发。
+//
+// 只列业务推送帧。连接层的 kick 帧不在这里：它由 ws 包自己定义（见 ws.frameKick），
+// 走的是传输层协议，不经过 service 的业务推送路径。
 const (
 	FrameMessage       = "message"
 	FrameMessageRecall = "message_recall"
@@ -176,9 +179,7 @@ const (
 	FrameFriendRequest = "friend_request"
 	FrameFriendAccept  = "friend_accept"
 	FrameGroupEvent    = "group_event"
-	FrameMomentNew     = "moment_new"
 	FrameNotice        = "notice"
-	FrameKick          = "kick"
 )
 
 // Frame 是 WebSocket 下行消息的统一结构。

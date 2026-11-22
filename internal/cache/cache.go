@@ -16,7 +16,6 @@ package cache
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"math/rand"
 	"time"
@@ -113,6 +112,3 @@ func (c *Cache) Remember(ctx context.Context, key string, ttl time.Duration, loa
 	}
 	return v.([]byte), nil
 }
-
-// MarshalJSON 便捷序列化，供 service 层复用。
-func MarshalJSON(v any) ([]byte, error) { return json.Marshal(v) }

@@ -43,12 +43,6 @@ func (r *FriendRepo) GetRequest(ctx context.Context, id int64) (*model.FriendReq
 	return &req, err
 }
 
-// UpdateRequestStatus 更新申请状态。
-func (r *FriendRepo) UpdateRequestStatus(ctx context.Context, id int64, status int8) error {
-	return r.db.WithContext(ctx).Model(&model.FriendRequest{}).
-		Where("id = ?", id).Update("status", status).Error
-}
-
 // ListRequests 分页查询收到/发出的申请。
 func (r *FriendRepo) ListRequests(ctx context.Context, uid int64, incoming bool, limit int) ([]model.FriendRequest, error) {
 	var list []model.FriendRequest
@@ -60,17 +54,6 @@ func (r *FriendRepo) ListRequests(ctx context.Context, uid int64, incoming bool,
 	}
 	err := q.Order("id DESC").Limit(limit).Find(&list).Error
 	return list, err
-}
-
-// AddFriends 双向写入好友关系，已存在则忽略（ON DUPLICATE KEY UPDATE 语义）。
-func (r *FriendRepo) AddFriends(ctx context.Context, a, b int64) error {
-	rows := []model.Friend{
-		{UserID: a, FriendID: b},
-		{UserID: b, FriendID: a},
-	}
-	return r.db.WithContext(ctx).
-		Clauses(clause.OnConflict{DoNothing: true}).
-		Create(&rows).Error
 }
 
 // DelFriends 双向删除好友关系。
@@ -127,14 +110,6 @@ func (r *FriendRepo) Unblock(ctx context.Context, uid, targetID int64) error {
 		Delete(&model.Blacklist{}).Error
 }
 
-// IsBlocked 判断 a 是否拉黑了 b。
-func (r *FriendRepo) IsBlocked(ctx context.Context, a, b int64) (bool, error) {
-	var count int64
-	err := r.db.WithContext(ctx).Model(&model.Blacklist{}).
-		Where("user_id = ? AND blocked_user_id = ?", a, b).Limit(1).Count(&count).Error
-	return count > 0, err
-}
-
 // EitherBlocked 判断双方是否存在任一方向的拉黑关系。
 func (r *FriendRepo) EitherBlocked(ctx context.Context, a, b int64) (bool, error) {
 	var count int64
@@ -150,14 +125,6 @@ func (r *FriendRepo) ListBlocked(ctx context.Context, uid int64) ([]model.Blackl
 	err := r.db.WithContext(ctx).Where("user_id = ?", uid).
 		Order("id DESC").Find(&list).Error
 	return list, err
-}
-
-// BlockedIDs 取黑名单 ID 集合。
-func (r *FriendRepo) BlockedIDs(ctx context.Context, uid int64) ([]int64, error) {
-	var ids []int64
-	err := r.db.WithContext(ctx).Model(&model.Blacklist{}).
-		Where("user_id = ?", uid).Pluck("blocked_user_id", &ids).Error
-	return ids, err
 }
 
 // BlockedRelatedIDs 取与 uid 存在任一方向拉黑关系的用户 ID（含我拉黑的、拉黑我的）。

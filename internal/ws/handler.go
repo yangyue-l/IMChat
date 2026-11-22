@@ -95,7 +95,7 @@ func (h *Handler) Serve(c *gin.Context) {
 
 	// 同设备重复登录时顶掉旧连接，避免一端多开导致消息重复
 	if old := h.hub.register(client); old != nil {
-		_ = old.trySend([]byte(`{"type":"kick","data":{"reason":"账号在其他地方登录"}}`))
+		_ = old.trySend(kickFrame("账号在其他地方登录", ""))
 		old.Close()
 	}
 
