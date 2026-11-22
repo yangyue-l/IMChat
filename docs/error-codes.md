@@ -64,7 +64,7 @@ handler 交给 `resp.Fail`，中间件用 `resp.Abort`。本文说明每个码�
 
 - **分页参数不做静默兜底**。`offset` 传错就报 40000，不会回退成第一页——
   静默归零会让无限滚动永远拉同一批数据，而客户端看不出自己传错了。
-  对比 `queryInt`（未传取缺省）与 `queryPaging`（传了就必须合法），两者语义不同。
+  对比 `queryNonNegInt`（未传取 0）与 `queryPaging`（传了就必须合法），两者语义不同。
 - **`client_msg_id` 必填**。缺了直接 40000，不会替你生成一个——
   没有它就无法保证重发幂等，宁可报错也不要制造重复消息。
 
@@ -147,7 +147,7 @@ handler 交给 `resp.Fail`，中间件用 `resp.Abort`。本文说明每个码�
 | WebSocket 上行帧失败 | `{"type":"error","data":{"msg":"..."}}` | **只有 `msg`，没有 `code`**，无法按码分流，只能展示文案；文案直接来自 service 层 |
 | WebSocket 被踢 | Close 帧 `4001`，reason `kicked` | 被顶号或主动踢线，按「已退出登录」处理，不要当网络异常无限重连 |
 | WebSocket 上行超频 | `error` 帧「发送过于频繁」 | 只丢这一帧，连接保持 |
-| `/healthz` | 恒 200 + `status` 字段 | 探活专用，不是业务接口。`status` 为 `ok` / `degraded`，逐项结果见 `mysql`、`redis` 字段（`ok` / `down`）；降级时不改 HTTP 状态码，也不回显错误详情 |
+| `/healthz` | 恒 200 + `status` 字段 | 探活专用，不是业务接口（`server.healthz: false` 时整条路由不注册，返回 404）。`status` 为 `ok` / `degraded`，逐项结果见 `mysql`、`redis`、`oss` 字段（`ok` / `down`）；降级时不改 HTTP 状态码，也不回显错误详情 |
 | `/metrics` | 纯文本（Prometheus 格式） | 非 JSON |
 
 WS 上行没有业务码是当前的已知限制：单连接限流、参数错误、业务校验失败

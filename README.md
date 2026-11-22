@@ -3,7 +3,7 @@
 一套可运行、可扩展的 IM 后端 + 演示前端，覆盖私聊、群聊、好友、拉黑、朋友圈全套功能，
 面向**高并发 / 高可用 / 高性能**场景做了针对性设计。
 
-技术栈：**Go 1.22+ · Gin · GORM · MySQL 8 · Redis 7 · RabbitMQ 4 · WebSocket**
+技术栈：**Go 1.26.4+ · Gin · GORM · MySQL 8 · Redis 7 · RabbitMQ 4 · WebSocket**
 
 ---
 
@@ -30,9 +30,9 @@
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
-> 容器端口做了错开，避免与本机已有服务冲突：
-> MySQL `13306`、Redis `16379`、RabbitMQ `5672`、管理台 `15672`。
-> 若本机端口空闲，可自行改回默认端口，同步修改 `config/config.yaml`。
+> 依赖容器用默认端口：MySQL `3306`、Redis `6379`、RabbitMQ `5672`、管理台 `15672`。
+> 本机已有 MySQL / Redis 时会端口冲突，先停掉它们；或者改 `deploy/docker-compose.yml`
+> 的端口映射，并同步修改 `config/config.yaml`。
 
 ### 2. 启动服务
 
@@ -40,70 +40,29 @@ docker compose -f deploy/docker-compose.yml up -d
 go run ./cmd/server -c config/config.yaml -node 1
 ```
 
-服务启动后会自动建表。访问 <http://127.0.0.1:8080/> 打开演示前端，
-注册两个账号即可体验完整流程（建议开两个浏览器窗口）。
+服务启动后会自动建表。后端只提供 API 与 WebSocket，不托管页面 ——
+验证接口用第 4 节的端到端冒烟，或者启动前端（见第 3 步）。
 
 ### 3. 前端
 
-前端源码与产物都在 `web/` 下，职责靠目录区分：
-
-```
-web/
-├── app/                # Vue 3 + Vite 源码（Vite root，入口 app/index.html）
-├── index.html          # 构建产物：自包含单文件，由 nginx / 静态站点托管
-├── package.json
-├── vite.config.js
-└── node_modules/       # 依赖，不入库
-```
-
-构建产物是自包含的单个 HTML（JS / CSS 全部内联）。后端**不托管**它：
-gin 只提供 API 与 WebSocket，页面由 nginx 或静态站点托管，两者可以分别部署、分别扩容。
+后端不托管前端：gin 只出 `/api/v1` 与 `/ws`，页面产物自行交给 nginx 或静态站点。
 
 ```bash
-# 构建（产物写入 web/index.html，随后交给 nginx / 静态站点托管）
-make web
-# 等价于：cd web && npm install && npm run build
-
-# 开发模式：Vite 起在 :5173，/api 与 /ws 代理到 :8080
-make web-dev
+make web       # 构建产物到 web/index.html
+make web-dev   # 开发服务器起在 :5173，/api 与 /ws 代理到 :8080
 ```
 
-> 仓库里已经提交了构建产物，只跑后端时无需安装 Node。改动 `web/app/` 后再执行 `make web` 即可。
+仓库里已经提交了构建产物，只跑后端时无需安装 Node；改完前端源码再执行一次 `make web` 即可。
 
-#### 部署拓扑
-
-前后端完全分离，三部分各自独立部署：
-
-| 部分 | 内容 | 在哪 |
-|---|---|---|
-| 前端 | `web/index.html` 构建产物 | nginx / CDN / 静态站点 |
-| 后端 | `/api/v1/*`、`/ws` | Go 服务，只出接口 |
-| 图片 | 用户上传的头像、聊天图、朋友圈配图 | 阿里云 OSS（`upload.public_base` 指向 CDN 或 bucket 域名） |
-
-前端在**构建期**指定两个地址（默认同源，不配就保持同域部署的行为）：
-
-```bash
-VITE_API_BASE=https://api.example.com/api/v1 \
-VITE_WS_BASE=wss://api.example.com \
-npm run build
-```
-
-- `VITE_WS_BASE` 也接受 `https://` 写法，运行时自动换成 `wss://`；
-- 图片不需要前端拼前缀：上传接口返回的就是完整的绝对 URL，写进 `avatar` / `images` 后可直接 `<img src>`；
-- 这些变量也可以写在 `web/.env.local`（已 gitignore），避免每次手敲。
-
-跨域后端已经就绪：`middleware.CORS()` 反射 `Origin` 并放行 `Authorization`，
-WebSocket 的 `CheckOrigin` 目前恒为 `true`（生产环境建议改成白名单）。
-
-### 4. 验证（48 项端到端用例）
+### 4. 验证（单节点 45 项，双节点 48 项）
 
 ```bash
 # 单节点
-go run ./cmd/smoke -base http://127.0.0.1:8080
+go run ./test/e2e -base http://127.0.0.1:8080
 
-# 双节点集群：额外验证跨节点推送
+# 双节点集群：额外验证跨节点推送（多 3 项断言）
 go run ./cmd/server -c config/config-cluster.yaml -node 2 &
-go run ./cmd/smoke -base http://127.0.0.1:8080 -cluster-base http://127.0.0.1:8081
+go run ./test/e2e -base http://127.0.0.1:8080 -cluster-base http://127.0.0.1:8081
 ```
 
 覆盖：注册登录、好友申请与通过、私聊实时推送、消息幂等、撤回权限、
@@ -113,10 +72,9 @@ go run ./cmd/smoke -base http://127.0.0.1:8080 -cluster-base http://127.0.0.1:80
 
 | 地址 | 用途 |
 |---|---|
-| `http://127.0.0.1:8080/` | 演示前端 |
-| `http://127.0.0.1:8080/healthz` | 健康检查 |
+| `http://127.0.0.1:8080/healthz` | 健康检查（`server.healthz: false` 可关） |
 | `http://127.0.0.1:8080/metrics` | Prometheus 指标（`server.metrics: false` 可关） |
-| `http://127.0.0.1:8080/debug/pprof/` | 性能分析 |
+| `http://127.0.0.1:8080/debug/pprof/` | 性能分析（`server.pprof: true` 才挂载） |
 | `http://127.0.0.1:15672/` | RabbitMQ 管理台（imchat / imchat123456） |
 
 ---
@@ -126,8 +84,7 @@ go run ./cmd/smoke -base http://127.0.0.1:8080 -cluster-base http://127.0.0.1:80
 ```
 IMChat/
 ├── cmd/
-│   ├── server/            # 入口：装配依赖、优雅启停
-│   └── smoke/             # 端到端冒烟测试工具
+│   └── server/            # 入口：装配依赖、优雅启停
 ├── config/                # YAML 配置（cluster 版用于双节点验证）
 ├── deploy/                # docker-compose 与初始化 SQL
 ├── internal/
@@ -141,15 +98,15 @@ IMChat/
 │   ├── cache/             # Redis 封装（缓存/计数/在线状态）
 │   ├── infra/             # MySQL / Redis 连接
 │   ├── storage/           # 对象存储（阿里云 OSS），只管写入与回收
-│   ├── media/             # 对象 key 与对外访问地址互转（换 CDN 只改配置）
 │   ├── middleware/        # 鉴权、限流、日志、跨域
-│   └── pkg/               # jwt / 雪花 ID / 响应 / 日志
-├── web/                   # 前端（源码 + 构建产物）
-│   ├── app/               #   Vue 3 + Vite 源码
-│   └── index.html         #   单文件构建产物，由 nginx / 静态站点托管
+│   └── pkg/               # 工具：key/URL 互转、jwt、雪花 ID、响应、日志
+├── test/
+│   └── e2e/               # 端到端冒烟测试：真 HTTP + WS，单节点 45 项
+├── web/                   # 前端源码与构建产物（启动与构建见第二节）
 └── docs/                  # 设计与接口文档
     ├── architecture.md    # 架构与关键取舍
     ├── data-model.md      # 数据模型字段与索引清单
+    ├── redis-keys.md      # Redis Key 的结构、TTL 与使用场景
     ├── deploy.md          # 配置项总表、环境变量与多节点部署要点
     ├── error-codes.md     # 业务错误码与客户端分流口径
     └── api.md             # 接口说明
@@ -170,7 +127,7 @@ IMChat/
 ```
 1. 幂等判定      client_msg_id -> Redis SETNX，重复请求直接返回已落库消息
 2. 分配序号      Redis INCR 按会话自增，保证会话内严格有序
-3. 落库          MySQL 唯一索引 (from_id, client_msg_id) 兜底并发重复
+3. 落库          MySQL 唯一索引 client_msg_id 兜底并发重复
 4. 会话/未读     私聊双方各写一行 + Redis 计数；群聊只更新群表指针（读扩散）
 5. 在线推送      只序列化一次，多连接复用同一份字节
 6. 离线补偿      全部接收者离线时投递 MQ，由消费者做离线通知
@@ -221,7 +178,7 @@ IMChat/
 
 - RabbitMQ publisher confirm + 手动 ACK，消息不丢。
 - 重试通过重投并累加 `x-retry`（`Nack requeue` 不会改 header，这点容易踩坑），
-  超过 3 次转死信队列。
+  同一条消息最多投递 3 次（含首次），仍失败转死信队列。
 - MQ 未启用时自动降级为本地内存总线，同一套 handler 两种模式行为一致。
 
 **接口层**
@@ -263,10 +220,10 @@ IMChat/
 
 ---
 
-## 六、压测建议
+## 六、验证与压测
 
 ```bash
-go run ./cmd/smoke -base http://127.0.0.1:8080   # 功能回归
+go run ./test/e2e -base http://127.0.0.1:8080   # 功能回归（单节点 45 项）
 curl http://127.0.0.1:8080/metrics               # 在线连接、帧数、goroutine、堆内存
 go tool pprof http://127.0.0.1:8080/debug/pprof/profile?seconds=30
 ```
@@ -280,8 +237,7 @@ go tool pprof http://127.0.0.1:8080/debug/pprof/profile?seconds=30
 
 1. **消息表分库分表**：按 `conv_id` 哈希分片，或按时间分区。
 2. **群列表上量**：用户加入的群过万时，把群列表与最新消息缓存进 Redis。
-3. **对象存储**：把本地磁盘换成 OSS/S3，接口已抽象为 URL 返回。
-4. **推送网关**：离线通知接入 APNs / FCM / 厂商通道。
-5. **敏感词与内容审核**：接入第三方审核服务，落库前拦截。
-6. **可观测性**：接入 OpenTelemetry，链路追踪补全 MQ 段。
+3. **推送网关**：离线通知接入 APNs / FCM / 厂商通道。
+4. **敏感词与内容审核**：接入第三方审核服务，落库前拦截。
+5. **可观测性**：接入 OpenTelemetry，链路追踪补全 MQ 段。
 

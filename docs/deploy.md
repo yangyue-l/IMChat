@@ -22,7 +22,8 @@
 | Redis 7 | 缓存、序列号、未读计数、已读、设备在线、限流窗口、跨节点总线 | 不可省，`redis.addr` 缺失启动即失败 |
 | RabbitMQ 4 | 朋友圈写扩散、离线通知 | `rabbitmq.enabled=false` 时降级为进程内内存总线 |
 
-本地依赖用 compose 拉起（端口做了错开，避免与本机已有服务冲突）：
+本地依赖用 compose 拉起（全部用默认端口；本机已有 MySQL / Redis 时会端口冲突，
+需要先停掉它们，或改端口映射并同步 `config/config.yaml`）：
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
@@ -47,7 +48,7 @@ go run ./cmd/server -c config/config.yaml -node 1
   让 AutoMigrate 在同一轮启动里把新索引建回来。
 
 ```bash
-mysql -h127.0.0.1 -P13306 -uroot -p imchat < deploy/migrate/20261024-index-refactor.sql
+mysql -h127.0.0.1 -P3306 -uroot -p imchat < deploy/migrate/20261024-index-refactor.sql
 ```
 
 - 迁移脚本写成可重复执行（`information_schema` 判断 + `DROP`），重跑不会报错；
@@ -62,8 +63,9 @@ mysql -h127.0.0.1 -P13306 -uroot -p imchat < deploy/migrate/20261024-index-refac
 **布尔开关没有默认值**：`enabled`、`pprof`、`auto_migrate`、`distributed` 不写就是 `false`，
 这与「写了 `false`」等价，不存在「未填」这一状态。
 
-`server.metrics` 是唯一的例外：**不写视为开启**。这个端点默认必须暴露，否则老配置
-升级后会因为缺字段静默失去全部指标；字段声明成 `*bool` 正是为了区分「没写」与「写了 false」。
+`server.metrics` 与 `server.healthz` 是两个例外：**不写视为开启**。这两个端点默认必须暴露，
+否则老配置升级后会因为缺字段静默失去指标、或让探针拿到 404 把健康实例整批摘掉；
+字段声明成 `*bool` 正是为了区分「没写」与「写了 false」。
 
 ### server
 
@@ -80,6 +82,7 @@ mysql -h127.0.0.1 -P13306 -uroot -p imchat < deploy/migrate/20261024-index-refac
 | `graceful_timeout` | `15s` | 正时长 | 停机总预算，见第六节 |
 | `pprof` | `false` | 布尔 | 打开才挂载 `/debug/pprof` |
 | `metrics` | **`true`** | 布尔 | 不写即暴露 `/metrics`；显式写 `false` 才关，关掉后该路径返回 404 |
+| `healthz` | **`true`** | 布尔 | 不写即挂载 `/healthz`；显式写 `false` 才关，关掉后该路径返回 404。关闭时 `Dockerfile` 的 `HEALTHCHECK` 与负载均衡探针必须一起停掉，否则实例恒为不健康 |
 
 ### mysql
 
@@ -272,7 +275,7 @@ mysql -h127.0.0.1 -P13306 -uroot -p imchat < deploy/migrate/20261024-index-refac
 
 | 端点 | 鉴权 | 说明 |
 |---|---|---|
-| `/healthz` | 无 | 并发探测 MySQL、Redis 与 OSS（各 1s 超时），返回 `{"status":"ok\|degraded", "mysql":"ok\|down", "redis":"ok\|down", "oss":"ok\|down"}` |
+| `/healthz` | 无 | 并发探测 MySQL、Redis 与 OSS（各 1s 超时），返回 `{"status":"ok\|degraded", "mysql":"ok\|down", "redis":"ok\|down", "oss":"ok\|down"}`；`server.healthz=false` 时整条路由不注册 |
 | `/metrics` | 无 | Prometheus 文本格式，见下；`server.metrics=false` 时整条路由不注册 |
 | `/debug/pprof/*` | 无 | 仅 `server.pprof=true` 时挂载，生产慎开 |
 | `/ws` | 握手参数带令牌 | 浏览器 WS 不能设自定义头，令牌走查询参数 |
@@ -306,6 +309,11 @@ mysql -h127.0.0.1 -P13306 -uroot -p imchat < deploy/migrate/20261024-index-refac
 是为了把「配错了」和「抓到了空数据」区分开。这个端点与 `/healthz` 一样不鉴权，
 公网暴露等于把 goroutine 数、堆内存、上传总量这些内部状态交出去，入口处要么按
 路径拦截，要么显式关闭。
+
+`/healthz` 同样可以用 `server.healthz: false` 关掉（不写则默认开启，与 `metrics` 一致）。
+它没有后台协程也没有定时器，只在请求到达时才执行一次探测，所以常驻成本是零；
+关掉纯粹是为了本机开发时不暴露运维端点。**注意关掉之后容器探针会拿到 404**，
+`Dockerfile` 的 `HEALTHCHECK` 与负载均衡的健康检查必须同步停掉，否则实例恒为不健康。
 
 多节点部署时这些是**单节点**视角的值，监控侧按实例聚合，不要按集群求和后看绝对值。
 
@@ -361,7 +369,7 @@ docker run -d --name imchat -p 8080:8080 --stop-timeout 30 \
 
 四个必踩的点：
 
-1. **镜像里的 `config.yaml` 是本地开发配置**（`127.0.0.1:13306`）。容器里必须用
+1. **镜像里的 `config.yaml` 是本地开发配置**（`127.0.0.1:3306`）。容器里必须用
    `IMCHAT_MYSQL_DSN` / `IMCHAT_REDIS_ADDR` / `IMCHAT_RABBITMQ_URL` 覆盖成服务名，
    否则会连到容器自己的回环地址，报 `connection refused`。
 2. **`.env` 不进镜像**（`.dockerignore` 已排除）。凭据走 `-e` 或 `--env-file`，
@@ -371,7 +379,8 @@ docker run -d --name imchat -p 8080:8080 --stop-timeout 30 \
    否则连接会被硬切，客户端看到的是「连接异常断开」而不是正常关闭。
 4. **`HEALTHCHECK` 探的是 `/healthz`，它永远返回 200**：只反映进程还能响应 HTTP，
    抓的是死锁、goroutine 泄漏这类假活；依赖可用性在响应体里，DB 挂了不会变成 unhealthy
-   —— 那种情况重启容器也解决不了。
+   —— 那种情况重启容器也解决不了。注意 `server.healthz=false` 会让这条探针拿到 404
+   而恒定判为 unhealthy，两者必须一起改。
 
 构建阶段在容器内跑 `go mod download`，没有本机的 `GOPROXY` 配置，所以 Dockerfile 默认给了
 `goproxy.cn`；在海外构建时用 `--build-arg GOPROXY=` 覆盖成空即可走官方源。

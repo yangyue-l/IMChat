@@ -42,7 +42,8 @@
 | ws | 连接生命周期、帧编解码、推送 | 业务校验（转发给 service） |
 | cache | Key 规划、缓存三大问题防护 | 业务语义 |
 
-`service` 通过 `Pusher` / `Publisher` 两个接口依赖上层能力，因此 service 不 import ws、不 import mq，避免循环依赖。
+`service` 用一组窄接口依赖外层能力（`Pusher` 推送、`Presence` 在线查询、`DeviceKicker` 踢线、
+`Publisher` 投递事件、`Files` 回收对象），因此不 import ws、不 import mq，避免循环依赖。
 
 ---
 
@@ -62,7 +63,7 @@ handler ──▶ service.SendPrivate
               ├─3 序号：Redis INCR im:seq:<conv_id>
               │
               ├─4 落库：INSERT messages
-              │      uk(from_id, client_msg_id) 兜住并发重复
+              │      uk_from_client(client_msg_id) 兜住并发重复
               │
               ├─5 会话：UpsertConversations(批量 ON DUPLICATE KEY UPDATE)
               │      Redis Lua HINCRBY 未读数 + 续期
@@ -89,7 +90,8 @@ handler ──▶ service.SendPrivate
 ### 3.1 为什么要分片
 
 朴素实现用一个全局 `map[int64]*Client` + 一把大锁，N 万连接下推送会串行等待。
-这里按 `uid` 做哈希散列到 64 个 shard，每个 shard 独立 `sync.RWMutex`：
+这里按 `uid` 做哈希散列到 64 个 shard（`cluster.shards`，默认 64，必须是 2 的幂），
+每个 shard 独立 `sync.RWMutex`：
 
 ```go
 x := uint64(uid)
@@ -241,7 +243,7 @@ shard := shards[x & 63]
 | 自愈 | 连接断开由后台 `NotifyClose` 监听触发，指数退避重连（1s→30s），重连后重建池 |
 | 消费 | 每个 worker 独占一条 channel（各自 `Qos`+`Consume`），手动 ACK，单条超时 15s |
 | 并发 | `consumer_workers`（默认 3）；未确认消息总量 = `prefetch × workers` |
-| 重试 | 重新发布并累加 `x-retry`，超过 3 次转死信 |
+| 重试 | 重新发布并累加 `x-retry`，累计投递 3 次（含首次）仍失败转死信 |
 
 **为什么并发靠多 channel 而不是多 goroutine**：`amqp.Channel` 不是并发安全的，
 一条 channel 上做并发消费只能串行化，等于没加并发。所以 worker 数 = channel 数。
@@ -325,10 +327,10 @@ Redis 与 MySQL 无法同事务，只能选一个方向保证：
 | 1000 人群单条消息 | 5 条 SQL、0 行会话写入，实测 ~26ms |
 | HTTP 接口 P99（本地） | < 30ms |
 
-压测方法：
+验证与压测：
 
 ```bash
-go run ./cmd/smoke -base http://127.0.0.1:8080          # 功能回归（45 项）
+go run ./test/e2e -base http://127.0.0.1:8080           # 功能回归（单节点 45 项）
 curl http://127.0.0.1:8080/metrics                      # 在线连接、收发/丢弃帧数、goroutine、堆内存
 go tool pprof http://127.0.0.1:8080/debug/pprof/profile?seconds=30
 ```
