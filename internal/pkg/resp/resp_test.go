@@ -188,7 +188,7 @@ func TestFailUnwrapsBusinessError(t *testing.T) {
 }
 
 func TestFailHidesUnknownError(t *testing.T) {
-	internal := errors.New("dial tcp 127.0.0.1:13306: connect: refused, dsn=root:p@ssw0rd@tcp/db")
+	internal := errors.New("dial tcp 127.0.0.1:3306: connect: refused, dsn=root:p@ssw0rd@tcp/db")
 
 	cases := []struct {
 		name string
@@ -215,7 +215,7 @@ func TestFailHidesUnknownError(t *testing.T) {
 				t.Fatalf("msg = %q, want 兜底文案 %q", msg, ErrInternal.Msg)
 			}
 			// 连接串、密码这类内容只能进日志，不能跟着响应体回到客户端。
-			for _, leak := range []string{"13306", "dsn", "p@ssw0rd"} {
+			for _, leak := range []string{"3306", "dsn", "p@ssw0rd"} {
 				if strings.Contains(msg, leak) {
 					t.Fatalf("兜底文案泄露了内部错误细节 %q: %q", leak, msg)
 				}

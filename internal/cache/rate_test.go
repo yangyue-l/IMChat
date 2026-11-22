@@ -14,7 +14,7 @@ import (
 // newTestCache 连接本机 Redis，连不上就跳过，避免无依赖环境下误报失败。
 func newTestCache(t *testing.T) *Cache {
 	t.Helper()
-	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:16379"})
+	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:6379"})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := rdb.Ping(ctx).Err(); err != nil {

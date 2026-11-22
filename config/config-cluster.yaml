@@ -11,8 +11,8 @@ server:
   pprof: true            # 是否挂载 /debug/pprof
 
 mysql:
-  # 容器映射到 3307，避免与本机已有 MySQL 冲突
-  dsn: "root:root123456@tcp(127.0.0.1:13306)/imchat?charset=utf8mb4&parseTime=True&loc=Local"
+  # 连 compose 里的 MySQL，端口用默认值
+  dsn: "root:root123456@tcp(127.0.0.1:3306)/imchat?charset=utf8mb4&parseTime=True&loc=Local"
   max_idle_conns: 20
   max_open_conns: 200
   conn_max_lifetime: 30m
@@ -20,8 +20,8 @@ mysql:
   auto_migrate: true
 
 redis:
-  # 容器映射到 6380，避免与本机已有 Redis 冲突
-  addr: "127.0.0.1:16379"
+  # 连 compose 里的 Redis，端口用默认值
+  addr: "127.0.0.1:6379"
   password: ""
   db: 0
   pool_size: 200

@@ -5,10 +5,12 @@ import { viteSingleFile } from 'vite-plugin-singlefile';
 /**
  * 目录约定：
  *   web/app/         前端源码（Vite root，入口 app/index.html）
- *   web/index.html   构建产物，gin 用 StaticFile 直接托管
+ *   web/index.html   构建产物：自包含单文件，交给 nginx 或静态站点托管
  *
- * 产物必须是一个自包含的 HTML：JS / CSS 全部内联，后端不需要额外的静态资源路由。
+ * 产物必须是一个自包含的 HTML：JS / CSS 全部内联，部署时只需一个文件。
  * 因此 outDir 指向 web/ 根目录，且不能清空它（否则会把源码和 package.json 删掉）。
+ *
+ * 后端不托管它：gin 只出 /api/v1 与 /ws。
  */
 export default defineConfig({
   root: 'app',
@@ -26,7 +28,6 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': { target: 'http://127.0.0.1:8080', changeOrigin: true },
-      '/uploads': { target: 'http://127.0.0.1:8080', changeOrigin: true },
       '/ws': { target: 'ws://127.0.0.1:8080', ws: true },
     },
   },

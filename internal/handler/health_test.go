@@ -105,7 +105,7 @@ func TestHealthzReportsEachDependency(t *testing.T) {
 // healthz 不鉴权，驱动错误里常带 DSN、主机端口与账号；只报 down 就够了，
 // 具体原因看服务端日志。
 func TestHealthzHidesDependencyErrorDetail(t *testing.T) {
-	secret := errors.New(`dial tcp 127.0.0.1:13306: password p@ssw0rd refused`)
+	secret := errors.New(`dial tcp 127.0.0.1:3306: password p@ssw0rd refused`)
 	r := newHealthRouter(map[string]Prober{
 		"mysql": proberFunc(func(context.Context) error { return secret }),
 	})
@@ -116,7 +116,7 @@ func TestHealthzHidesDependencyErrorDetail(t *testing.T) {
 	r.healthz(c)
 
 	raw := rec.Body.String()
-	for _, fragment := range []string{"13306", "p@ssw0rd", "dial tcp"} {
+	for _, fragment := range []string{"3306", "p@ssw0rd", "dial tcp"} {
 		if strings.Contains(raw, fragment) {
 			t.Fatalf("响应体泄露了内部错误片段 %q：%s", fragment, raw)
 		}

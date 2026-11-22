@@ -7,7 +7,7 @@
 --   3. 删除索引 -> AutoMigrate 只会新增，永远不会删。
 --
 -- 执行顺序：先跑本脚本，再重启服务让 AutoMigrate 把新索引建回来。
--- 用法：mysql -h127.0.0.1 -P13306 -uroot -p123456 imchat < deploy/migrate/20261024-index-refactor.sql
+-- 用法：mysql -h127.0.0.1 -P3306 -uroot -p123456 imchat < deploy/migrate/20261024-index-refactor.sql
 -- 脚本可重复执行；messages 索引重建期间缺一个分页索引，安排在低峰期。
 --
 -- 本脚本对应的模型改动：

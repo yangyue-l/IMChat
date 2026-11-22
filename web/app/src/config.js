@@ -1,5 +1,5 @@
 /**
- * 部署相关的三个基地址，默认全部同源 —— 与「gin 直接托管 web/index.html」完全一致。
+ * 部署相关的三个基地址，默认全部同源（前端与 API 走同一个 host）。
  *
  * 完全分离部署（前端在 CDN / 静态站点，后端在 api.example.com）时，
  * 用 VITE_* 在构建期覆盖：
@@ -20,7 +20,10 @@ export const ASSET_BASE = trim(env.VITE_ASSET_BASE);
 
 const ABSOLUTE = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i;
 
-/** 把后端返回的 /uploads/... 补成可直接访问的地址；已经是绝对地址的原样返回。 */
+/**
+ * 图片地址归一：后端返回的已经是绝对地址（OSS / CDN），这里原样放行；
+ * 只有相对地址才会补上 VITE_ASSET_BASE，供同源部署或反向代理场景使用。
+ */
 export function assetUrl(url) {
   if (!url) return '';
   if (ABSOLUTE.test(url)) return url;
