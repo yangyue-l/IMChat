@@ -176,6 +176,7 @@ func TestLoadAppliesDefaults(t *testing.T) {
 		{"server.ws_send_buffer", cfg.Server.WSSendBuffer, 512},
 		{"server.graceful_timeout", cfg.Server.GracefulTimeout.Get(), 15 * time.Second},
 		{"server.metrics", cfg.Server.MetricsEnabled(), true},
+		{"server.healthz", cfg.Server.HealthzEnabled(), true},
 
 		{"mysql.max_idle_conns", cfg.MySQL.MaxIdleConns, 20},
 		{"mysql.max_open_conns", cfg.MySQL.MaxOpenConns, 200},
@@ -265,6 +266,38 @@ func TestMetricsEnabled(t *testing.T) {
 	}
 	if cfg.Server.MetricsEnabled() {
 		t.Fatal("yaml 里写 metrics: false 之后仍视为开启")
+	}
+}
+
+// TestHealthzEnabled 钉住 /healthz 开关的语义，与 MetricsEnabled 保持一致：
+// 不写即开启，只有显式写 false 才关闭。
+//
+// 默认值的方向必须是「开」：探活是部署前提，老配置里没有 healthz 字段时若默认关，
+// 升级后编排会拿到 404 把实例整批判为不健康，而报障现象只会是「服务不可用」。
+func TestHealthzEnabled(t *testing.T) {
+	yes, no := true, false
+	for _, c := range []struct {
+		name string
+		in   *bool
+		want bool
+	}{
+		{"未配置", nil, true},
+		{"显式开启", &yes, true},
+		{"显式关闭", &no, false},
+	} {
+		if got := (ServerConfig{Healthz: c.in}).HealthzEnabled(); got != c.want {
+			t.Errorf("%s：HealthzEnabled() = %v，期望 %v", c.name, got, c.want)
+		}
+	}
+
+	// 再走一遍 yaml 解析：*bool 的反序列化是这次新增的风险点。
+	clearEnv(t)
+	cfg, err := Load(writeConfig(t, minimalYAML+"server:\n  healthz: false\n"))
+	if err != nil {
+		t.Fatalf("加载配置失败: %v", err)
+	}
+	if cfg.Server.HealthzEnabled() {
+		t.Fatal("yaml 里写 healthz: false 之后仍视为开启")
 	}
 }
 

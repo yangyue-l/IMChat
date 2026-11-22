@@ -56,6 +56,13 @@ type ServerConfig struct {
 	// Metrics 控制是否暴露 /metrics。用指针而不是 bool：要区分「没写」与
 	// 「显式写 false」，而 bool 的零值和「未配置」长得一样。
 	Metrics *bool `yaml:"metrics"`
+	// Healthz 控制是否挂载 /healthz，语义与 Metrics 完全一致。
+	//
+	// 关掉只是不注册这条路由（请求落到 NoRoute 的 404），探活代码本身不会常驻：
+	// 它没有后台协程、没有定时器，只在请求到达时才执行一次探测。
+	// 但容器探针会因此拿到 404 而恒定判为不健康，Dockerfile 的 HEALTHCHECK
+	// 与负载均衡的健康检查必须同步停掉，所以默认开启。
+	Healthz *bool `yaml:"healthz"`
 }
 
 // MetricsEnabled 报告是否暴露 /metrics。
@@ -64,6 +71,15 @@ type ServerConfig struct {
 // 会因为缺这个字段静默失去全部指标，那比这里多一个特例严重得多。
 func (s ServerConfig) MetricsEnabled() bool {
 	return s.Metrics == nil || *s.Metrics
+}
+
+// HealthzEnabled 报告是否挂载 /healthz。
+//
+// 未配置同样视为开启：探活是部署前提，老配置升级后若静默丢掉这个端点，
+// 编排会拿到 404 把健康实例整批摘掉，而现象只是「服务不可用」，很难联想到配置。
+// 本机不想留这条路由时显式写 healthz: false。
+func (s ServerConfig) HealthzEnabled() bool {
+	return s.Healthz == nil || *s.Healthz
 }
 
 type MySQLConfig struct {

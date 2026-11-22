@@ -73,10 +73,12 @@ func NewRouter(cfg *config.Config, svc *service.Services, jwtMgr *jwt.Manager,
 	// 全局 15s 会把「网速慢」误判成「接口挂了」。改为每个分组自己声明预算。
 	apiTimeout := middleware.Timeout(cfg.Server.WriteTimeout.Get())
 
-	// 健康检查与运维接口，不参与限流
-	engine.GET("/healthz", r.healthz)
-	// /metrics 默认开启，只有显式配 metrics: false 才不注册 —— 关掉之后是 404，
-	// 不是空响应，这样「配错了」和「抓到了空数据」能区分开。
+	// 健康检查与运维接口，不参与限流。
+	// 两个开关都是「不写即开启」，只有显式写 false 才不注册。
+	if cfg.Server.HealthzEnabled() {
+		engine.GET("/healthz", r.healthz)
+	}
+	// /metrics 关掉之后是 404，不是空响应，这样「配错了」和「抓到了空数据」能区分开。
 	if cfg.Server.MetricsEnabled() {
 		engine.GET("/metrics", r.metrics)
 	}

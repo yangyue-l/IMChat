@@ -47,6 +47,9 @@ EXPOSE 8080
 # （见 internal/handler/health.go）。所以这条探针保证的是「进程还能响应 HTTP」，
 # 用来抓死锁、goroutine 泄漏这类假活；DB 挂了它不会变成 unhealthy ——
 # 那种情况重启容器也没用。
+#
+# 把 server.healthz 配成 false 会让这条探针拿到 404 而被恒定判为 unhealthy，
+# 两者必须一起改（负载均衡那边的健康检查同理）。
 HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
     CMD wget -qO- http://127.0.0.1:8080/healthz || exit 1
 
