@@ -1,7 +1,10 @@
-// Command smoke 是端到端冒烟测试工具：真实调用 HTTP 与 WebSocket 接口，
+// Command e2e 是端到端冒烟测试工具：真实调用 HTTP 与 WebSocket 接口，
 // 覆盖注册、好友、黑名单、私聊、群聊、朋友圈与实时推送全链路。
 //
-// 用法：go run ./cmd/smoke -base http://127.0.0.1:8080
+// 放在 test/ 而不是 cmd/：cmd/ 是交付的主程序（Makefile 只编 cmd/server），
+// 这里是一次性起停的验证工具，按 Go 的模块布局归到 external test app。
+//
+// 用法：go run ./test/e2e -base http://127.0.0.1:8080
 package main
 
 import (
@@ -71,7 +74,7 @@ func testFriendFlow(a, b *account) {
 	call("DELETE", "/blacklist/"+b.ID, b.Token)
 
 	res := call("GET", "/users/search?keyword="+b.User.Username, a.Token)
-	if !assert("搜索到目标用户", res.Code == 0 && bytes.Contains(res.Data, []byte(b.User.Username))) {
+	if !assert("搜索到目标用户", res.Code == 0 && contains(res.Data, b.User.Username)) {
 		return
 	}
 
@@ -86,18 +89,21 @@ func testFriendFlow(a, b *account) {
 	}
 
 	res = call("GET", "/friend-requests?type=incoming", b.Token)
+	// from_user 同样是 PublicUser，没有 username，只能按 uid 认人。
 	var reqs []struct {
 		ID       string `json:"id"`
 		Status   int8   `json:"status"`
 		FromUser struct {
-			Username string `json:"username"`
+			// 服务端用 `json:"id,string"` 把大整数编码成字符串输出，
+			// 客户端这里就是普通 string，再套 `,string` 反而会解析失败。
+			ID string `json:"id"`
 		} `json:"from_user"`
 	}
 	_ = json.Unmarshal(res.Data, &reqs)
 	var reqID string
 	for _, r := range reqs {
 		// 只挑待处理的申请，历史记录不参与
-		if r.FromUser.Username == a.User.Username && r.Status == 0 {
+		if r.FromUser.ID == a.ID && r.Status == 0 {
 			reqID = r.ID
 		}
 	}
@@ -109,7 +115,8 @@ func testFriendFlow(a, b *account) {
 	check("bob 同意申请", res)
 
 	res = call("GET", "/friends", a.Token)
-	assert("双向好友关系生效", res.Code == 0 && bytes.Contains(res.Data, []byte(b.User.Username)))
+	// 好友项是 PublicUser，只有昵称没有登录名。
+	assert("双向好友关系生效", res.Code == 0 && contains(res.Data, b.User.Nickname))
 
 	// 重复申请应被拦截
 	res = call("POST", "/friend-requests", a.Token, map[string]any{"to_user_id": b.IDStr})
@@ -191,7 +198,7 @@ func testBlacklist(a, b *account) {
 	assert("拉黑后消息被拦截", res.Code != 0)
 
 	res = call("GET", "/blacklist", a.Token)
-	assert("黑名单列表包含 bob", res.Code == 0 && bytes.Contains(res.Data, []byte(b.User.Username)))
+	assert("黑名单列表包含 bob", res.Code == 0 && contains(res.Data, b.User.Nickname))
 
 	res = call("DELETE", "/blacklist/"+b.ID, a.Token)
 	check("解除拉黑", res)
@@ -223,7 +230,7 @@ func testGroupChat(a, b, c *account) {
 	assertWithMsg("群成员上限为 1000", group.MaxMember == 1000, fmt.Sprintf("max_member=%d", group.MaxMember))
 
 	res = call("GET", "/groups/"+group.ID, a.Token)
-	assert("群详情包含成员列表", res.Code == 0 && bytes.Contains(res.Data, []byte(c.User.Username)))
+	assert("群详情包含成员列表", res.Code == 0 && contains(res.Data, c.User.Nickname))
 
 	res = call("POST", "/groups/"+group.ID+"/members", a.Token, map[string]any{
 		"user_ids": []string{},
@@ -392,11 +399,12 @@ func mustUser(username, nickname string) *account {
 		}
 	}
 
+	// user 是 PublicUser，不含 username：登录名只在 /users/search 的结果里回传，
+	// 这里别指望从响应反解，否则拿到空串会让后面的搜索与断言全部失真。
 	var data struct {
 		Token string `json:"token"`
 		User  struct {
 			ID       string `json:"id"`
-			Username string `json:"username"`
 			Nickname string `json:"nickname"`
 		} `json:"user"`
 	}
@@ -405,7 +413,7 @@ func mustUser(username, nickname string) *account {
 		os.Exit(1)
 	}
 	a := &account{ID: data.User.ID, IDStr: data.User.ID, Token: data.Token}
-	a.User.Username = data.User.Username
+	a.User.Username = username
 	a.User.Nickname = data.User.Nickname
 	return a
 }
@@ -557,6 +565,14 @@ func check(name string, res apiResp) {
 	msg := fmt.Sprintf("%s: %s", name, res.Msg)
 	failures = append(failures, msg)
 	fmt.Printf("  ✗ %s (%s)\n", name, res.Msg)
+}
+
+// contains 判断响应里是否出现某个值。
+//
+// 不直接用 bytes.Contains：needle 是空串时它恒为 true，断言就变成「永远通过」的
+// 假绿。这类断言依赖的值一旦因为响应结构变化而取空，必须当场判失败而非静默放过。
+func contains(data []byte, want string) bool {
+	return want != "" && bytes.Contains(data, []byte(want))
 }
 
 func assert(name string, ok bool) bool {

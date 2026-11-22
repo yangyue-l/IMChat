@@ -7,7 +7,7 @@ help:
 	@echo "make web     构建前端到 web/index.html（单文件产物）"
 	@echo "make web-dev 启动前端开发服务器（:5173，代理到 :8080）"
 	@echo "make lint    go vet 静态检查"
-	@echo "make fmt     格式化 ./cmd 与 ./internal"
+	@echo "make fmt     格式化 ./cmd、./internal 与 ./test"
 	@echo "make test    运行全部单测"
 	@echo "make cover   单测并输出总覆盖率"
 	@echo "make tidy    go mod tidy"
@@ -33,7 +33,7 @@ tidy:
 
 lint:
 	go vet ./...
-	gofmt -l ./cmd ./internal
+	gofmt -l ./cmd ./internal ./test
 
 # -count=1 关掉测试结果缓存：本机没有 MySQL/Redis 时大量用例走 t.Skip，
 # 缓存会把「依赖起好后本该真跑」的那次复用成 skip，看日志根本分不清。
@@ -45,9 +45,9 @@ cover:
 	go test -count=1 -coverprofile=coverage.out ./...
 	@go tool cover -func=coverage.out | tail -n 1
 
-# 只格式化 lint 检查的那两个目录，避免 -w 顺手改到 pkg 之外的文件。
+# 只格式化 lint 检查的那三个目录，避免 -w 顺手改到 pkg 之外的文件。
 fmt:
-	gofmt -w ./cmd ./internal
+	gofmt -w ./cmd ./internal ./test
 
 up:
 	docker compose -f deploy/docker-compose.yml up -d
